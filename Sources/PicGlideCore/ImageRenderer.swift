@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
-import CoreImage
+// CIContext supports concurrent rendering; older SDKs omit its Sendable annotation.
+@preconcurrency import CoreImage
 import CoreImage.CIFilterBuiltins
 
 public struct RenderedImage: @unchecked Sendable {
