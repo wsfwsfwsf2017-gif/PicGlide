@@ -86,7 +86,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
     }
     func navigationButton() -> CursorRegionView? {
         CursorRegionView.regions(in: delegate.window.contentView!).first {
-            abs($0.cursorRect.width - 44) < 0.5 && abs($0.cursorRect.height - 56) < 0.5
+            abs($0.cursorRect.width - 44) < 0.5 && abs($0.cursorRect.height - 112) < 0.5
         }
     }
     func showNavigation(_ direction: Int, canvas: CanvasView) async throws -> CursorRegionView {
@@ -99,9 +99,9 @@ func runSmokeChecks(delegate: AppDelegate) async {
               NSCursor.current === button.cursor else { fatalError("Navigation cursor overlaps canvas or fails to match button") }
         return button
     }
-    func clickNavigation() {
+    func clickNavigation(at localPoint: NSPoint? = nil) {
         let button = navigationButton()!
-        let point = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil)
+        let point = button.convert(localPoint ?? NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil)
         mouse(.leftMouseDown, at: point); mouse(.leftMouseUp, at: point)
     }
     func saveButtonRect() -> NSRect {
@@ -255,20 +255,24 @@ func runSmokeChecks(delegate: AppDelegate) async {
         guard right.cursor === NSCursor.pointingHand else { fatalError("Next button is not clickable") }
         try capture("viewer-edge-navigation")
         let beforeNavigationPan = canvas.viewport.pan
-        clickNavigation()
+        let upperPoint = NSPoint(x: right.bounds.midX, y: right.bounds.maxY - 8)
+        try await hover(right, point: upperPoint)
+        clickNavigation(at: upperPoint)
         try await wait { !model.isLoading && model.frame != nil && model.index == 1 && navigationButton() != nil }
         guard canvas.viewport.pan == beforeNavigationPan else { fatalError("Navigation click panned image") }
-        clickNavigation()
+        clickNavigation(at: upperPoint)
         try await wait { !model.isLoading && model.frame != nil && model.index == 2 && navigationButton() != nil }
         try await hover(navigationButton()!)
         guard navigationButton()!.cursor === NSCursor.arrow else { fatalError("Last image next button is enabled") }
         clickNavigation(); try await Task.sleep(for: .milliseconds(150))
         guard model.index == 2 else { fatalError("Next button wrapped after last image") }
-        checks.append("Native next button supports repeated clicks without moving pointer and stops at last image")
-        _ = try await showNavigation(-1, canvas: canvas)
-        clickNavigation()
+        checks.append("Native next button supports upper-edge and repeated clicks without moving pointer and stops at last image")
+        let previous = try await showNavigation(-1, canvas: canvas)
+        let lowerPoint = NSPoint(x: previous.bounds.midX, y: previous.bounds.minY + 8)
+        try await hover(previous, point: lowerPoint)
+        clickNavigation(at: lowerPoint)
         try await wait { !model.isLoading && model.frame != nil && model.index == 1 }
-        checks.append("Native previous button navigates backward")
+        checks.append("Native previous button supports lower-edge clicks")
         try await hover(canvas, point: NSPoint(x: 20, y: 60))
         let edgePoint = canvas.convert(NSPoint(x: 20, y: 60), to: nil)
         let beforeEdgeDrag = canvas.viewport.pan

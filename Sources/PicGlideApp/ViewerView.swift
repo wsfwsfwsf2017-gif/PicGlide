@@ -56,7 +56,8 @@ struct ViewerView: View {
         let title = previous ? "上一张" : "下一张"
         return Button { model.navigate(direction) } label: {
             Image(systemName: previous ? "chevron.left" : "chevron.right")
-                .font(.system(size: 19, weight: .medium)).frame(width: 44, height: 56)
+                .font(.system(size: 19, weight: .medium)).frame(width: 44, height: 112)
+                .contentShape(Rectangle())
         }
         .buttonStyle(ClickableButtonStyle()).disabled(!enabled || model.isLoading)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
