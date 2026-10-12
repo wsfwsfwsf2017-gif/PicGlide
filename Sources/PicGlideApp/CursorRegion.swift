@@ -1,9 +1,43 @@
 import AppKit
 import SwiftUI
 
+// The type alias selects the property wrapper even when newer SDKs also expose a State macro.
+private typealias HoverState = SwiftUI.State<Bool>
+
 struct ClickableButtonStyle: ButtonStyle {
+    var selected = false
+    var prominent = false
+
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label.background(CursorRegion(cursor: .pointingHand))
+        Content(configuration: configuration, selected: selected, prominent: prominent)
+    }
+
+    private struct Content: View {
+        let configuration: ButtonStyle.Configuration
+        let selected: Bool
+        let prominent: Bool
+        @Environment(\.isEnabled) private var isEnabled
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+        @HoverState private var hovered = false
+
+        private var fill: Color {
+            guard isEnabled else { return .clear }
+            if prominent { return .accentColor.opacity(configuration.isPressed ? 0.75 : hovered ? 0.9 : 1) }
+            if selected { return .accentColor.opacity(configuration.isPressed ? 0.2 : hovered ? 0.17 : 0.12) }
+            return .primary.opacity(configuration.isPressed ? 0.12 : hovered ? 0.07 : 0)
+        }
+
+        var body: some View {
+            configuration.label
+                .foregroundStyle(prominent && isEnabled ? Color.white : selected ? Color.accentColor : Color.primary)
+                .background {
+                    RoundedRectangle(cornerRadius: 8).fill(fill)
+                }
+                .opacity(isEnabled ? 1 : 0.35)
+                .background(CursorRegion(cursor: .pointingHand))
+                .onHover { hovered = $0 }
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hovered)
+        }
     }
 }
 

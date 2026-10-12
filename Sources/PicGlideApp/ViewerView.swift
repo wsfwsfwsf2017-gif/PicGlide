@@ -42,13 +42,8 @@ struct ViewerView: View {
 
     private var emptyView: some View {
         VStack(spacing: 18) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 26)
-                    .fill(.thinMaterial).frame(width: 104, height: 104)
-                    .overlay(RoundedRectangle(cornerRadius: 26).stroke(.white.opacity(0.16)))
-                Image(systemName: "photo")
-                    .font(.system(size: 43, weight: .ultraLight)).foregroundStyle(.blue)
-            }
+            Image(nsImage: NSApp.applicationIconImage).resizable().interpolation(.high)
+                .frame(width: 120, height: 120)
             VStack(spacing: 8) {
                 Text("PicGlide").font(.system(size: 28, weight: .medium, design: .rounded))
                 Text(model.loadingError ?? "拖入图片，开始浏览")
@@ -61,8 +56,7 @@ struct ViewerView: View {
                     Text("⌘O").foregroundStyle(.white.opacity(0.65))
                 }.padding(.horizontal, 18).padding(.vertical, 10)
             }
-            .buttonStyle(ClickableButtonStyle()).foregroundStyle(.white)
-            .background(.blue, in: Capsule())
+            .buttonStyle(ClickableButtonStyle(prominent: true))
             .help("打开图片（⌘O）")
             Text("拖动移动  ·  滚轮缩放  ·  方向键切换")
                 .font(.system(size: 11)).foregroundStyle(.tertiary).padding(.top, 10)
@@ -87,87 +81,116 @@ struct ViewerView: View {
 
     private var controls: some View {
         VStack(spacing: 0) {
-            if model.isEditing {
-                HStack(spacing: 5) {
+            HStack(spacing: 4) {
+                if model.isEditing {
                     ForEach(EditTool.allCases, id: \.self) { tool in
                         Button { model.chooseTool(tool) } label: {
-                            VStack(spacing: 5) {
-                                Image(systemName: tool.symbol).font(.system(size: 16, weight: .medium))
-                                Text(tool.title).font(.system(size: 10, weight: .medium))
-                            }
-                            .frame(width: 52, height: 48)
-                            .foregroundStyle(model.tool == tool ? Color.white : Color.primary.opacity(0.75))
-                            .background(model.tool == tool ? Color.blue : .clear, in: RoundedRectangle(cornerRadius: 11))
-                        }.buttonStyle(ClickableButtonStyle()).help(tool.title).accessibilityLabel(tool.title)
+                            Image(systemName: tool.symbol).font(.system(size: 15, weight: .medium))
+                                .frame(width: 32, height: 32)
+                        }
+                        .buttonStyle(ClickableButtonStyle(selected: model.tool == tool))
+                        .help(tool == .hand ? "拖动图片（按住空格可临时拖动）" : tool.title)
+                        .accessibilityLabel(tool.title)
+                        .accessibilityAddTraits(model.tool == tool ? .isSelected : [])
                     }
                     separator
                     iconButton("撤销", symbol: "arrow.uturn.backward", enabled: model.canUndo, action: model.undo)
                     iconButton("重做", symbol: "arrow.uturn.forward", enabled: model.canRedo, action: model.redo)
+                } else {
+                    iconButton("上一张", symbol: "chevron.left", enabled: model.index > 0) { model.navigate(-1) }
+                    Text("\(model.index + 1) / \(model.files.count)")
+                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                        .lineLimit(1).frame(width: 78)
+                        .help("第 \(model.index + 1) 张，共 \(model.files.count) 张")
+                    iconButton("下一张", symbol: "chevron.right", enabled: model.index + 1 < model.files.count) { model.navigate(1) }
+                    separator
                 }
-                .padding(.top, 10).padding(.horizontal, 12)
-                toolOptions.padding(.vertical, 11).padding(.horizontal, 16)
-                Divider().opacity(0.5).padding(.horizontal, 14)
-            }
-            HStack(spacing: 10) {
-                iconButton("上一张", symbol: "chevron.left", enabled: model.index > 0) { model.navigate(-1) }
-                Text("\(model.index + 1) / \(model.files.count)")
-                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-                    .frame(minWidth: 54)
-                iconButton("下一张", symbol: "chevron.right", enabled: model.index + 1 < model.files.count) { model.navigate(1) }
-                separator
-                Text("\(Int(model.zoomPercentage.rounded()))%")
-                    .font(.system(size: 11, design: .monospaced)).frame(minWidth: 43)
-                iconButton("适应窗口（⌘0）", symbol: "arrow.down.right.and.arrow.up.left") { model.setZoom(actualSize: false) }
-                iconButton("原始尺寸（⌘1）", symbol: "1.square") { model.setZoom(actualSize: true) }
-                separator
+                zoomMenu
+                Spacer(minLength: 4)
                 Button(action: model.toggleEditing) {
-                    Label(model.isEditing ? "完成" : "编辑", systemImage: model.isEditing ? "checkmark" : "slider.horizontal.3")
-                        .font(.system(size: 12, weight: .medium)).padding(.horizontal, 10).frame(height: 30)
-                        .background(model.isEditing ? Color.blue.opacity(0.12) : Color.primary.opacity(0.06), in: Capsule())
-                }.buttonStyle(ClickableButtonStyle()).help("切换编辑（⌘E）")
-                if model.isDirty {
-                    Button { model.save() } label: {
-                        Label("保存", systemImage: "square.and.arrow.down")
-                            .font(.system(size: 12, weight: .medium)).padding(.horizontal, 11).frame(height: 30)
-                            .foregroundStyle(.white).background(.blue, in: Capsule())
-                    }.buttonStyle(ClickableButtonStyle()).help("覆盖保存（⌘S）")
+                    Text(model.isEditing ? "返回浏览" : "编辑")
+                        .font(.system(size: 12, weight: .medium)).lineLimit(1)
+                        .frame(width: model.isEditing ? 76 : 48, height: 32)
+                }
+                .buttonStyle(ClickableButtonStyle())
+                .help(model.isEditing ? "返回浏览，保留修改（⌘E）" : "编辑图片（⌘E）")
+                Button { model.save() } label: {
+                    Text("保存").font(.system(size: 12, weight: .medium)).frame(width: 52, height: 32)
+                }
+                .buttonStyle(ClickableButtonStyle(prominent: true)).disabled(!model.canSave)
+                .help(model.pendingCrop == nil ? "覆盖保存（⌘S）" : "先应用或取消裁剪，再保存")
+                if model.isEditing {
+                    Menu {
+                        Button("另存为…") { model.save(asCopy: true) }.disabled(!model.canSaveCopy)
+                    } label: {
+                        Image(systemName: "ellipsis").font(.system(size: 15)).frame(width: 32, height: 32)
+                    }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden)
+                    .frame(width: 32, height: 32)
+                    .background(CursorRegion(cursor: .pointingHand))
+                    .help("更多操作").accessibilityLabel("更多操作")
                 }
             }
-            .padding(.horizontal, 14).padding(.vertical, 10)
+            .padding(.horizontal, 10).padding(.vertical, 8)
+            if model.isEditing && model.tool != .hand {
+                Divider().opacity(0.4).padding(.horizontal, 12)
+                toolOptions.frame(height: 32).padding(.horizontal, 14).padding(.vertical, 6)
+            }
         }
-        .fixedSize(horizontal: true, vertical: false)
+        .frame(width: model.isEditing ? 548 : 472)
         .background(CursorRegion(cursor: .arrow, model: model))
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
-        .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.12 : 0.45)))
-        .shadow(color: .black.opacity(colorScheme == .dark ? 0.28 : 0.12), radius: 18, y: 7)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.1 : 0.4)))
+        .shadow(color: .black.opacity(colorScheme == .dark ? 0.2 : 0.1), radius: 12, y: 5)
         .onHover { hover in model.toolbarHovered = hover; model.revealControls() }
         .disabled(model.isBusy)
+    }
+
+    private var zoomMenu: some View {
+        Menu {
+            Button("适应窗口（⌘0）") { model.setZoom(actualSize: false) }
+            Button("原始尺寸（⌘1）") { model.setZoom(actualSize: true) }
+        } label: {
+            HStack(spacing: 4) {
+                Text("\(Int(model.zoomPercentage.rounded()))%")
+                    .font(.system(size: 11, design: .monospaced)).lineLimit(1)
+                Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold)).foregroundStyle(.secondary)
+            }.frame(width: 64, height: 32)
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden)
+        .frame(width: 64, height: 32)
+        .background(CursorRegion(cursor: .pointingHand))
+        .help("缩放比例").accessibilityLabel("缩放比例")
     }
 
     @ViewBuilder private var toolOptions: some View {
         switch model.tool {
         case .hand:
-            Text("拖动图片 · 按住空格可临时切换拖动")
-                .font(.system(size: 11)).foregroundStyle(.secondary).frame(height: 22)
+            EmptyView()
         case .crop:
             HStack(spacing: 12) {
-                Text("拖出保留区域 · Esc 取消").font(.system(size: 11)).foregroundStyle(.secondary)
-                Button("应用裁剪 ↵", action: model.applyCrop)
-                    .buttonStyle(.borderedProminent).controlSize(.small)
-                    .background(CursorRegion(cursor: .pointingHand)).disabled(model.pendingCrop == nil)
-            }.frame(height: 22)
+                Text(model.pendingCrop == nil ? "拖出需要保留的区域" : "应用裁剪后再保存")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                Button(action: model.applyCrop) {
+                    Text("应用 ↵").font(.system(size: 12, weight: .medium)).padding(.horizontal, 10).frame(height: 32)
+                }.buttonStyle(ClickableButtonStyle(prominent: true)).disabled(model.pendingCrop == nil)
+                Button { model.chooseTool(.crop) } label: {
+                    Text("取消").font(.system(size: 12)).padding(.horizontal, 10).frame(height: 32)
+                }.buttonStyle(ClickableButtonStyle()).disabled(model.pendingCrop == nil).help("取消裁剪选区（Esc）")
+            }
         case .mosaic:
             HStack(spacing: 12) {
                 Text("颗粒").font(.system(size: 11)).foregroundStyle(.secondary)
-                Slider(value: $model.blockSize, in: 4...64, step: 1).frame(width: 190)
+                Slider(value: Binding(get: { model.blockSize }, set: { model.blockSize = $0.rounded() }), in: 4...64).frame(width: 190)
                     .background(CursorRegion(cursor: .arrow)).accessibilityLabel("马赛克颗粒大小")
                 Text("\(Int(model.blockSize)) px").font(.system(size: 10, design: .monospaced)).frame(width: 42)
-            }.frame(height: 22)
+            }
         case .pencil, .rectangle:
             HStack(spacing: 9) {
+                Text("颜色").font(.system(size: 11)).foregroundStyle(.secondary)
                 ColorPicker("颜色", selection: $model.color, supportsOpacity: false).labelsHidden().frame(width: 30)
                 Text("粗细").font(.system(size: 11)).foregroundStyle(.secondary)
-                Slider(value: $model.lineWidth, in: 1...64, step: 1).frame(width: 94)
+                Slider(value: Binding(get: { model.lineWidth }, set: { model.lineWidth = $0.rounded() }), in: 1...64).frame(width: 94)
                     .background(CursorRegion(cursor: .arrow)).accessibilityLabel("线条粗细")
                 Text("\(Int(model.lineWidth))").font(.system(size: 10, design: .monospaced)).frame(width: 19)
                 Text("透明度").font(.system(size: 11)).foregroundStyle(.secondary)
@@ -175,15 +198,15 @@ struct ViewerView: View {
                     .background(CursorRegion(cursor: .arrow)).accessibilityLabel("线条透明度")
                 Text("\(Int(model.opacity * 100))%")
                     .font(.system(size: 10, design: .monospaced)).frame(width: 33)
-            }.frame(height: 22)
+            }
         }
     }
 
     private var separator: some View { Rectangle().fill(.primary.opacity(0.1)).frame(width: 1, height: 19).padding(.horizontal, 2) }
 
     private func iconButton(_ title: String, symbol: String, enabled: Bool = true, action: @escaping () -> Void) -> some View {
-        Button(action: action) { Image(systemName: symbol).font(.system(size: 13, weight: .medium)).frame(width: 26, height: 30) }
-            .buttonStyle(ClickableButtonStyle()).disabled(!enabled).foregroundStyle(enabled ? .primary : .tertiary)
+        Button(action: action) { Image(systemName: symbol).font(.system(size: 14, weight: .medium)).frame(width: 32, height: 32) }
+            .buttonStyle(ClickableButtonStyle()).disabled(!enabled)
             .help(title).accessibilityLabel(title)
     }
 }

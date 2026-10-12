@@ -14,14 +14,6 @@ for size in [16, 32, 128, 256, 512] {
             bytesPerRow: pixels * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
         context.interpolationQuality = .high
-        // Opaque tile and clean alpha prevent macOS from adding a second icon background.
-        let tile = CGRect(x: 0, y: 0, width: pixels, height: pixels)
-            .insetBy(dx: CGFloat(pixels) * 100 / 1024, dy: CGFloat(pixels) * 100 / 1024)
-        let radius = CGFloat(pixels) * 185 / 1024
-        context.addPath(CGPath(roundedRect: tile, cornerWidth: radius, cornerHeight: radius, transform: nil))
-        context.clip()
-        context.setFillColor(NSColor(srgbRed: 0.965, green: 0.459, blue: 0.314, alpha: 1).cgColor)
-        context.fill(CGRect(x: 0, y: 0, width: pixels, height: pixels))
         context.draw(source.cgImage!, in: CGRect(x: 0, y: 0, width: pixels, height: pixels))
         let representation = NSBitmapImageRep(cgImage: context.makeImage()!)
         let name = "icon_\(size)x\(size)\(multiplier == 2 ? "@2x" : "").png"

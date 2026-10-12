@@ -62,6 +62,8 @@ final class ViewerModel {
     var isBusy: Bool { isSaving || isPreparingEdit }
     var canUndo: Bool { history.canUndo && !isBusy }
     var canRedo: Bool { history.canRedo && !isBusy }
+    var canSave: Bool { isDirty && !isBusy && pendingCrop == nil }
+    var canSaveCopy: Bool { frame != nil && !isBusy && pendingCrop == nil }
     var ink: Ink {
         let rgb = NSColor(color).usingColorSpace(.sRGB) ?? .systemBlue
         return Ink(red: rgb.redComponent, green: rgb.greenComponent, blue: rgb.blueComponent, alpha: opacity)
@@ -243,6 +245,13 @@ final class ViewerModel {
 
     func save(asCopy: Bool = false, completion: (@MainActor (Bool) -> Void)? = nil) {
         guard !isBusy, let url = currentURL, let metadata else { completion?(false); return }
+        guard pendingCrop == nil else {
+            let alert = NSAlert()
+            alert.messageText = "先应用或取消裁剪"
+            alert.informativeText = "当前裁剪选区尚未应用，确认裁剪后再保存图片。"
+            alert.addButton(withTitle: "好")
+            alert.runModal(); completion?(false); return
+        }
         if !asCopy && multiFrame {
             showError(PicGlideError.multiFrame)
             save(asCopy: true, completion: completion); return

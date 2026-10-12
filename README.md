@@ -1,103 +1,61 @@
 # PicGlide
 
-<img src="Resources/AppIcon.png" width="96" alt="PicGlide 滑翔照片图标">
+<img src="Resources/AppIcon.png" width="88" alt="PicGlide 图标">
 
-macOS 原生看图与轻量标注软件。界面和代码独立实现，采用 SwiftUI、AppKit、ImageIO、Core Graphics、Core Image；唯一第三方依赖是用于 WebP 编码的 libwebp。
+轻量的 macOS 图片浏览与标注工具。
 
-## 构建与运行
+[下载最新版](https://github.com/wsfwsfwsf2017-gif/PicGlide/releases/latest) · [历史版本](https://github.com/wsfwsfwsf2017-gif/PicGlide/releases) · [更新记录](CHANGELOG.md)
 
-需要 Apple Silicon、macOS 14 或更新版本，以及支持 Swift 6 的 Xcode Command Line Tools。首次构建会通过 SwiftPM 下载固定版本的依赖，App 使用时没有网络请求。
+![PicGlide 界面](docs/screenshot.png)
+
+## 功能
+
+- 拖动平移、鼠标位置缩放、触控板捏合，方向键浏览同目录图片。
+- 马赛克、裁剪、矩形标注和自由铅笔，支持撤销与重做。
+- 原格式保存，或另存为 PNG、JPEG、WebP。
+- 浅色与深色外观、全屏浏览，以及闲置时自动收起的浮动工具栏。
+- 支持 JPG、PNG、WebP、HEIC/HEIF、BMP、TIFF 和 GIF 首帧。
+
+GIF 等多帧图片编辑后需另存为静态图片。覆盖保存会改写原文件；重新编码可能损失画质及部分元数据。
+
+## 下载与安装
+
+需要 **macOS 14 或更新版本、Apple Silicon（M 系列芯片）**。
+
+在 [Releases](https://github.com/wsfwsfwsf2017-gif/PicGlide/releases/latest) 下载对应版本的 `.dmg`，打开后将 PicGlide 拖入 Applications；也可下载 `.zip` 并解压安装。每个版本提供 SHA-256 校验文件。
+
+当前安装包未使用 Developer ID 签名和 Apple 公证。首次打开若被系统拦截，确认下载来源后，可在“系统设置 → 隐私与安全性”中选择“仍要打开”。[Apple 说明](https://support.apple.com/en-gb/102445)
+
+## 常用操作
+
+| 操作 | 快捷键／手势 |
+| --- | --- |
+| 打开图片 | `⌘O`、拖入窗口或 Finder 打开方式 |
+| 上一张／下一张 | `←` `↑` ／ `→` `↓` |
+| 平移／缩放 | 左键拖动／滚轮或触控板捏合 |
+| 适应窗口／原始尺寸 | `⌘0` ／ `⌘1` |
+| 切换编辑 | `⌘E` |
+| 编辑时临时平移 | 按住空格拖动 |
+| 应用裁剪／取消选区 | `↵` ／ `Esc` |
+| 撤销／重做 | `⌘Z` ／ `⇧⌘Z` |
+| 保存／另存为 | `⌘S` ／ `⇧⌘S` |
+| 全屏 | `⌃⌘F` |
+
+“返回浏览”保留修改，保存需单独执行。离开有未保存修改的图片时，会提示保存、放弃或取消。
+
+## 本地构建
+
+使用 Swift 6 和 Xcode Command Line Tools，首次构建由 SwiftPM 获取依赖。
 
 ```sh
 ./scripts/build-app.sh
 open build/PicGlide.app
 ```
 
-产物为 `build/PicGlide.app`，可手动拖入“应用程序”目录。构建脚本使用本地签名，面向本机自用，未做 Developer ID 签名和公证。
+运行测试：`./scripts/test.sh`。制作安装包：`./scripts/package-release.sh`。
 
-## 看图
+版本采用 `主版本.次版本.修订版本`，以 `Resources/Info.plist` 为准。更新版本与变更记录后，推送对应的 `vX.Y.Z` 标签，GitHub Actions 自动验证、打包并发布 Release。
 
-- 将图片拖入窗口、按 `⌘O` 或在 Finder 中选择“打开方式 → PicGlide”。
-- 默认左键拖图；滚轮以鼠标位置为中心缩放；触控板支持捏合。
-- `←/↑` 上一张，`→/↓` 下一张；按同文件夹内的文件名自然排序，到边界停止。
-- `⌘0` 适应窗口，`⌘1` 原始尺寸，`⌃⌘F` 全屏。
-- 双击顶部标题区域，窗口铺满当前屏幕的可用桌面；再双击恢复原大小和位置。保留菜单栏与 Dock。
-- 浮动工具栏闲置两秒后收起，鼠标移动时重新显示。
-- 工具栏可用按钮显示手指光标，禁用按钮及空白处显示箭头；移回画布后恢复拖拽手型或绘图十字。
+## 许可证
 
-## 编辑
-
-按“编辑”或 `⌘E` 展开工具，支持矩形马赛克、裁剪、画框和自由铅笔。铅笔与画框可调颜色、粗细、透明度；马赛克可调颗粒大小。
-
-- 裁剪：拖出保留区域，然后回车或点击“应用裁剪”。
-- 绘制工具下按住空格可临时拖图；Esc 取消未完成操作，再次按 Esc 切换手型。
-- `⌘Z` 撤销，`⇧⌘Z` 重做，包括裁剪。
-- `⌘S` 按原格式覆盖；`⇧⌘S` 另存为 PNG、JPEG 或 WebP。
-- 未保存时翻图、打开其他图片、关窗或退出，会提示保存、放弃或取消。
-
-## 格式与保存边界
-
-支持 JPG/JPEG、PNG、WebP、HEIC/HEIF、BMP、TIFF 和 GIF 首帧。多帧文件仅显示首帧，编辑后必须另存为静态图片；第一版不提供 RAW/PSD、相册管理和动图播放。
-
-覆盖保存会先在同目录编码并验证临时文件，再替换原文件。保存失败保留原图和当前编辑；检测到原文件被外部修改时阻止覆盖。只读位置需要另存到可写目录。
-
-JPEG/HEIC 使用 95% 质量重新编码，透明内容导出 JPEG/HEIC 时铺白底。WebP 无损编码保留透明度，但可能增大文件。绘制工具和 WebP 导出使用 8 位 sRGB，保存时重新生成元数据并去掉原图的嵌入预览；第一版不保证保留完整 EXIF/HDR 信息。
-
-## 验证
-
-```sh
-./scripts/test.sh
-```
-
-开发构建还可运行原生窗口检查，测试图与截图仅写入指定目录：
-
-```sh
-swift build
-PICGLIDE_SMOKE_OUTPUT="$PWD/.build/ui-checks" "$(swift build --show-bin-path)/PicGlide"
-```
-
-该检查覆盖原生画布事件、编辑、覆盖保存，以及浅色、深色和小窗口的截图。真实触控板手感仍需人工确认。
-
-本机 Swift 6.4 的增量测试出现 TestingMacros 加载错误，测试脚本会显式加载工具链自带的宏插件，避免要求安装完整 Xcode。
-
-## 第三方许可
-
-[libwebp-Xcode 1.6.0](https://github.com/SDWebImage/libwebp-Xcode) / [libwebp](https://github.com/webmproject/libwebp)：BSD-3-Clause。构建时将许可文件放入 App 资源目录。
-
-技术调研参考：SimpView 的画布交互、FlowVision 的降采样、ItsPaint 的编辑记录、Grabbit 的区域图像处理；没有引入这些 App 的代码或 UI。
-
-## 图标
-
-图标原图为 `Resources/AppIcon.png`（1024 × 1024，带透明通道），通过内置 imagegen 生成，打包脚本用 AppKit 缩放为十种图标规格并生成 `.icns`。不使用运行时图像生成服务。
-
-生成提示：为轻量看图软件 PicGlide 设计独立的现代 macOS 图标。珊瑚橙 `#F67550` 圆角底，奶油白 `#FFF3DF` 照片卡片折成向右上滑翔的纸翼，照片中保留简洁深蓝 `#202E3E` 图形。适度立体感、哑光纸张、柔和内阴影；居中、等宽透明外边距，小尺寸轮廓清楚，无文字、无水印、无外阴影。
-
-精修提示：保留主体、配色、构图和光影，仅清理圆角底以外的零散颜色和透明外缘，保持连续的抗锯齿轮廓与真实透明边距。原生成图经系统图像工具缩放至 1024 × 1024；已查看浅色、深色背景下的 16、32、128、512 像素预览。
-
-打包时统一圆角轮廓，并将圆角底内部合成为不透明图像，外侧保持透明，避免 macOS 再给半透明图标套上一层浅色底。该处理不改变照片纸翼的设计。
-
-## 本机验证记录 · 2026-10-12
-
-环境：Apple M5、24 GB 内存、macOS 27.2、Swift 6.4。Release 产物已通过本地签名验证，动态依赖仅为系统框架和系统 Swift 运行库。打包脚本先生成并验证新 App，再替换旧产物，构建失败时保留旧 App。
-
-| 检查 | 本次结果 |
-| --- | --- |
-| 自动测试 | 14 项通过：坐标、裁剪后标注、撤销重做、格式读写、透明度、文件保护、目录索引 |
-| 原生窗口检查 | 14 项通过：合成画布事件、三种未保存响应、全屏、工具栏收起与恢复、编辑和保存 |
-| App 体积 | 约 1.9 MB（1.83 MiB） |
-| 单次启动到可见窗口 | 约 0.63 秒，包含 Launch Services 启动 |
-| Release 空窗口 RSS | 约 93 MiB，包含系统框架映射 |
-| 2400 万像素图片预览 | 约 0.08 秒 |
-| 2400 万像素完整分辨率 | 约 0.21 秒 |
-| 2400 万像素画框 / 保存 | 约 0.07 秒 / 0.15 秒 |
-| 1001 张图片目录连续翻图 100 次 | 约 4.30 秒，包含脚本每张固定等待和轮询 |
-
-大图与翻图数据来自 Debug 自动化进程，包含测试图生成、截图和图像处理缓存，使用文件系统暖缓存。其 RSS 在 24MP 编辑时约 576 MiB，翻到第 50 / 100 张时约 434 / 434 MiB，后段没有持续增长；这些数值不能当作 Release 的日常空闲占用或其他设备的性能保证。
-
-已查看浅色、深色、小窗口及全屏截图。真实触控板手感、其他 macOS 版本和 Intel 硬件没有实测。原始结果与界面预览保存在构建目录的 `verification.json`、`preview.png`；第一版面向本机自用，未做上架、公证或外部分发。
-
-## 1.0.1 验证记录 · 2026-10-12
-
-14 项自动测试通过，29 项原生窗口检查通过。新增检查使用系统鼠标事件，覆盖工具栏按钮悬浮和点击、禁用按钮与空白区域、滑块点击、颜色面板关闭、拖拽手型、绘图十字、空格临时拖动，以及工具栏隐藏后的恢复。窗口铺满与恢复在本机两个 1920 × 1080 显示器上验证，头部拖动和全屏期间的双击也通过检查。
-
-Release App 约 2.8 MiB，构建与本地签名验证通过。图标已检查十种输出规格的像素尺寸和透明通道。详细结果保存在 `build/verification-1.0.1.json`，图标尺寸预览为 `build/icon-preview.png`。没有重复千图性能压测，也没有重新验证真实触控板手感及其他 macOS 版本。
+PicGlide 使用 [MIT 许可证](LICENSE)。WebP 编码依赖 [libwebp-Xcode / libwebp](https://github.com/SDWebImage/libwebp-Xcode)，使用 BSD-3-Clause 许可证；相关版权声明随 App 分发。

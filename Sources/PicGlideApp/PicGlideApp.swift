@@ -5,6 +5,9 @@ import SwiftUI
 enum PicGlideApp {
     static func main() {
         let application = NSApplication.shared
+        #if DEBUG
+        if let icon = NSImage(contentsOfFile: "Resources/AppIcon.png") { application.applicationIconImage = icon }
+        #endif
         let delegate = AppDelegate()
         application.delegate = delegate
         application.setActivationPolicy(.regular)
@@ -135,8 +138,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         switch menuItem.action {
         case #selector(undoEdit): model.canUndo
         case #selector(redoEdit): model.canRedo
-        case #selector(saveImage): model.isDirty && !model.isBusy
-        case #selector(saveCopy), #selector(toggleEdit), #selector(fitImage), #selector(actualSize): model.frame != nil && !model.isBusy
+        case #selector(saveImage): model.canSave
+        case #selector(saveCopy): model.canSaveCopy
+        case #selector(toggleEdit), #selector(fitImage), #selector(actualSize): model.frame != nil && !model.isBusy
         case #selector(previousImage): model.index > 0 && !model.isBusy
         case #selector(nextImage): model.index + 1 < model.files.count && !model.isBusy
         default: !model.isBusy
@@ -157,7 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc func about() {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "PicGlide",
-            .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.1",
+            .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版",
             .credits: NSAttributedString(string: "轻量看图，随手标注。\nWebP 编码：libwebp（BSD-3-Clause）")
         ])
     }

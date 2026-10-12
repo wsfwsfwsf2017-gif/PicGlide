@@ -84,6 +84,20 @@ func runSmokeChecks(delegate: AppDelegate) async {
     func nativeControls(in view: NSView) -> [NSControl] {
         (view as? NSControl).map { [$0] } ?? view.subviews.flatMap(nativeControls)
     }
+    func saveButtonRect() -> NSRect {
+        let region = cursorRegions(in: delegate.window.contentView!).first {
+            abs($0.cursorRect.width - 52) < 0.5 && abs($0.cursorRect.height - 32) < 0.5
+        }!
+        return region.convert(region.cursorRect, to: nil)
+    }
+    func checkToolbarLayout(_ label: String) {
+        let toolbar = delegate.model.toolbarCursorRegion!
+        let rect = toolbar.convert(toolbar.cursorRect, to: delegate.window.contentView!)
+        guard rect.height <= 96, rect.minX >= 16,
+              rect.maxX <= delegate.window.contentView!.bounds.width - 16 else { fatalError("Toolbar does not fit minimum window") }
+        measurements[label] = ["width": rect.width, "height": rect.height]
+        checks.append(label)
+    }
     func mouse(_ type: CGEventType, at point: NSPoint) {
         let screenPoint = delegate.window.convertPoint(toScreen: point)
         let location = CGPoint(x: screenPoint.x, y: NSScreen.screens[0].frame.maxY - screenPoint.y)
@@ -154,6 +168,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         try? FileManager.default.removeItem(at: output.appendingPathComponent("ui-report.json"))
         try? FileManager.default.removeItem(at: output.appendingPathComponent("failure.txt"))
+        try capture("welcome")
         try await checkHeaderFill("Empty window header fills desktop and restores frame")
         let originalFrame = delegate.window.frame
         for screen in NSScreen.screens {
@@ -262,6 +277,9 @@ func runSmokeChecks(delegate: AppDelegate) async {
         checks.append("Native toolbar button click enters editor without panning image")
         try await Task.sleep(for: .milliseconds(100))
         model.chooseTool(.pencil); canvas.update()
+        try await Task.sleep(for: .milliseconds(150))
+        let cleanSaveRect = saveButtonRect()
+        guard !model.canSave else { fatalError("Save enabled on clean image") }
         try await checkHeaderFill("Editing window header fills desktop and restores frame")
         try await checkToolbarCursor(canvas, label: "Editor native mouse restores crosshair outside controls")
         key(49, canvas: canvas)
@@ -304,11 +322,24 @@ func runSmokeChecks(delegate: AppDelegate) async {
         let b = canvas.viewport.viewPoint(from: CGPoint(x: 600, y: 380))
         drag(a, b, canvas: canvas)
         try await wait { model.history.operations.count == 1 }
+        try await Task.sleep(for: .milliseconds(150))
+        guard model.canSave && saveButtonRect().equalTo(cleanSaveRect) else { fatalError("Save position changed with dirty state") }
+        checks.append("Save stays visible and stationary across clean and dirty states")
         checks.append("Pencil gesture")
         respondToAlert("取消")
         model.navigate(1)
         guard model.currentURL == fixture && model.isDirty else { fatalError("Cancel lost edits") }
         checks.append("Native unsaved-dialog cancel preserves edits")
+        let editedOperations = model.history.operations
+        let fileBeforeExit = try Data(contentsOf: fixture)
+        model.toggleEditing()
+        try await Task.sleep(for: .milliseconds(150))
+        guard !model.isEditing, model.isDirty, model.canSave,
+              model.history.operations == editedOperations,
+              try Data(contentsOf: fixture) == fileBeforeExit else { fatalError("Return to browse lost or saved edits") }
+        try capture("viewer-unsaved")
+        model.toggleEditing(); model.chooseTool(.pencil); canvas.update()
+        checks.append("Return to browse preserves unsaved edits without writing file")
         model.chooseTool(.rectangle); canvas.update()
         drag(canvas.viewport.viewPoint(from: CGPoint(x: 900, y: 320)),
              canvas.viewport.viewPoint(from: CGPoint(x: 1450, y: 850)), canvas: canvas)
@@ -318,6 +349,23 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try await Task.sleep(for: .milliseconds(300))
         checks.append("Rectangle and mosaic gestures")
         model.chooseTool(.crop); canvas.update()
+        drag(canvas.viewport.viewPoint(from: CGPoint(x: 150, y: 100)),
+             canvas.viewport.viewPoint(from: CGPoint(x: 1600, y: 1050)), canvas: canvas)
+        let pending = model.pendingCrop
+        let beforeBlockedSave = try Data(contentsOf: fixture)
+        guard pending != nil, !model.canSave, !model.canSaveCopy else { fatalError("Pending crop did not disable save") }
+        for (action, asCopy) in [(#selector(AppDelegate.saveImage), false), (#selector(AppDelegate.saveCopy), true)] {
+            let entry = NSMenuItem(title: "保存", action: action, keyEquivalent: "s")
+            guard !delegate.validateMenuItem(entry) else { fatalError("Menu save enabled with pending crop") }
+            respondToAlert("好")
+            var refused = false
+            model.save(asCopy: asCopy) { refused = !$0 }
+            guard refused, model.pendingCrop == pending,
+                  try Data(contentsOf: fixture) == beforeBlockedSave else { fatalError("Pending crop save modified file or selection") }
+        }
+        checks.append("Pending crop blocks save and Save As in controls, menu and shared save entry")
+        key(53, canvas: canvas)
+        guard model.pendingCrop == nil, model.canSave else { fatalError("Cancel crop did not re-enable save") }
         drag(canvas.viewport.viewPoint(from: CGPoint(x: 150, y: 100)),
              canvas.viewport.viewPoint(from: CGPoint(x: 1600, y: 1050)), canvas: canvas)
         key(36, canvas: canvas)
@@ -331,6 +379,12 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try await Task.sleep(for: .milliseconds(150)); try capture("editor-dark")
         delegate.window.setContentSize(NSSize(width: 620, height: 440))
         try await Task.sleep(for: .milliseconds(200)); try capture("editor-small")
+        for tool in EditTool.allCases {
+            model.chooseTool(tool); canvas.update()
+            try await Task.sleep(for: .milliseconds(100))
+            checkToolbarLayout("Minimum-window \(tool.rawValue) toolbar fits within 96pt")
+        }
+        model.chooseTool(.pencil); canvas.update()
         delegate.window.toggleFullScreen(nil)
         try await wait { delegate.window.styleMask.contains(.fullScreen) }
         try await Task.sleep(for: .milliseconds(600)); try capture("editor-fullscreen")

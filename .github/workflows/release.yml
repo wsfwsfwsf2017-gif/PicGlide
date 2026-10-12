@@ -1,0 +1,51 @@
+name: 发布版本
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: 获取版本源码
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: 检查版本与架构
+        run: |
+          test "$(uname -m)" = arm64
+          test "$RELEASE_TAG" = "v$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)"
+          swift --version
+      - name: 运行核心测试
+        run: ./scripts/test.sh
+      - name: 构建并验证安装包
+        run: ./scripts/package-release.sh "$RELEASE_TAG"
+      - name: 发布安装包
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          task_existing=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq '.[].tag_name')
+          if grep -Fxq -- "$RELEASE_TAG" <<< "$task_existing"; then
+            echo "此版本已有 Release，拒绝覆盖：$RELEASE_TAG" >&2
+            exit 1
+          fi
+          task_version="${RELEASE_TAG#v}"
+          task_output="build/releases/$task_version"
+          gh release create "$RELEASE_TAG" \
+            "$task_output/PicGlide-$task_version-arm64.dmg" \
+            "$task_output/PicGlide-$task_version-arm64.zip" \
+            "$task_output/SHA256SUMS.txt" \
+            --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "PicGlide $task_version" --notes-file "$task_output/release-notes.md" --latest
