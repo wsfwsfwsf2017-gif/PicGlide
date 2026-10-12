@@ -61,20 +61,28 @@ func runSmokeChecks(delegate: AppDelegate) async {
             windowNumber: delegate.window.windowNumber, context: nil, eventNumber: 1, clickCount: 2, pressure: 1)!
         delegate.window.sendEvent(event)
     }
+    func fillsCurrentScreen() -> Bool {
+        guard let screen = delegate.window.screen else { return false }
+        return delegate.window.frame.equalTo(screen.visibleFrame)
+    }
+    func setUnzoomedWindowFrame(_ frame: NSRect) {
+        if delegate.window.isZoomed { delegate.window.zoom(nil) }
+        delegate.window.setFrame(frame, display: true)
+    }
     func checkHeaderFill(_ label: String) async throws {
         let original = delegate.window.frame
-        let available = delegate.window.screen!.visibleFrame
+        let startedFilled = fillsCurrentScreen()
         doubleClickHeader()
         try await Task.sleep(for: .milliseconds(400))
-        guard delegate.window.frame.equalTo(available) else {
+        guard fillsCurrentScreen() != startedFilled else {
             throw NSError(domain: "PicGlideSmoke", code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "Header double-click did not fill desktop: \(delegate.window.frame)"])
+                userInfo: [NSLocalizedDescriptionKey: "\(label): header double-click did not toggle screen fill: \(delegate.window.frame)"])
         }
         doubleClickHeader()
         try await Task.sleep(for: .milliseconds(400))
-        guard delegate.window.frame.equalTo(original) else {
+        guard startedFilled ? fillsCurrentScreen() : delegate.window.frame.equalTo(original) else {
             throw NSError(domain: "PicGlideSmoke", code: 4,
-                userInfo: [NSLocalizedDescriptionKey: "Header double-click did not restore window"])
+                userInfo: [NSLocalizedDescriptionKey: "\(label): header double-click did not restore window: \(delegate.window.frame), original: \(original), startedFilled: \(startedFilled)"])
         }
         checks.append(label)
     }
@@ -126,19 +134,21 @@ func runSmokeChecks(delegate: AppDelegate) async {
         event.post(tap: .cghidEventTap)
     }
     func hover(_ view: NSView, point: NSPoint? = nil) async throws {
+        var target = NSPoint.zero
+        var actual = NSPoint.zero
         for _ in 0..<3 {
             delegate.window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             try await Task.sleep(for: .milliseconds(50))
-            let target = view.convert(point ?? NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil)
+            target = view.convert(point ?? NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil)
             mouse(.mouseMoved, at: target)
             try await Task.sleep(for: .milliseconds(100))
-            let actual = delegate.window.mouseLocationOutsideOfEventStream
+            actual = delegate.window.mouseLocationOutsideOfEventStream
             // Retry only when external mouse movement or focus changes interrupted the input.
             if NSApp.isActive && delegate.window.isKeyWindow && hypot(actual.x - target.x, actual.y - target.y) < 5 { return }
         }
         throw NSError(domain: "PicGlideSmoke", code: 7,
-            userInfo: [NSLocalizedDescriptionKey: "Native pointer check interrupted by mouse movement or focus changes"])
+            userInfo: [NSLocalizedDescriptionKey: "Native pointer check interrupted: target=\(target), actual=\(actual), active=\(NSApp.isActive), key=\(delegate.window.isKeyWindow), attached=\(view.window === delegate.window), frame=\(delegate.window.frame), visible=\(delegate.window.occlusionState.contains(.visible)), frontmost=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "none")"])
     }
     func checkToolbarCursor(_ canvas: CanvasView, label: String) async throws {
         guard let toolbar = delegate.model.toolbarCursorRegion else { fatalError("Toolbar cursor region missing") }
@@ -188,14 +198,18 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         try? FileManager.default.removeItem(at: output.appendingPathComponent("ui-report.json"))
         try? FileManager.default.removeItem(at: output.appendingPathComponent("failure.txt"))
+        guard fillsCurrentScreen(), !delegate.window.styleMask.contains(.fullScreen) else {
+            fatalError("Launch did not fill current screen's available area as a normal window")
+        }
+        checks.append("Launch fills current screen's available area as a normal window")
         try capture("welcome")
         try await checkHeaderFill("Empty window header fills desktop and restores frame")
         let originalFrame = delegate.window.frame
         for screen in NSScreen.screens {
-            delegate.window.setFrame(screen.visibleFrame.insetBy(dx: 100, dy: 100), display: true)
+            setUnzoomedWindowFrame(screen.visibleFrame.insetBy(dx: 100, dy: 100))
             try await checkHeaderFill("Header fill and restore on \(screen.localizedName)")
         }
-        delegate.window.setFrame(originalFrame, display: true)
+        setUnzoomedWindowFrame(originalFrame.insetBy(dx: 100, dy: 100))
         let viewerWindow = delegate.window!
         for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
             let button = delegate.window.standardWindowButton(type)!
@@ -226,8 +240,24 @@ func runSmokeChecks(delegate: AppDelegate) async {
         let started = Date()
         model.requestOpen(fixture)
         try await wait { model.frame != nil && !model.isLoading }
+        guard fillsCurrentScreen() else { fatalError("Image open left a gap in available screen area") }
+        checks.append("Image open fills available screen area without covering menu bar or Dock")
         let firstImageTime = Date().timeIntervalSince(started)
+        for screen in NSScreen.screens {
+            let savedSize = NSScreen.screens[0].visibleFrame.insetBy(dx: 100, dy: 100).size
+            setUnzoomedWindowFrame(NSRect(origin: screen.visibleFrame.origin, size: savedSize))
+            model.requestOpen(fixture)
+            try await wait { model.frame != nil && !model.isLoading }
+            guard fillsCurrentScreen(), delegate.window.screen?.frame == screen.frame else {
+                fatalError("Image open did not fill the current display")
+            }
+            checks.append("Image open fills current display: \(screen.localizedName)")
+        }
+        setUnzoomedWindowFrame(originalFrame.insetBy(dx: 100, dy: 100))
+        model.requestOpen(fixture)
+        try await wait { model.frame != nil && !model.isLoading }
         try await Task.sleep(for: .milliseconds(350))
+        try capture("viewer-screen-filled")
         guard let canvas = findCanvas(delegate.window.contentView!) else {
             throw NSError(domain: "PicGlideSmoke", code: 2, userInfo: [NSLocalizedDescriptionKey: "Canvas not attached"])
         }
@@ -273,6 +303,17 @@ func runSmokeChecks(delegate: AppDelegate) async {
         clickNavigation(at: lowerPoint)
         try await wait { !model.isLoading && model.frame != nil && model.index == 1 }
         checks.append("Native previous button supports lower-edge clicks")
+        let beforeResize = delegate.window.frame
+        let resized = beforeResize.insetBy(dx: 100, dy: 100)
+        delegate.window.setFrame(resized, display: true)
+        model.navigate(1)
+        try await wait { !model.isLoading && model.frame != nil && model.index == 2 }
+        guard delegate.window.frame.equalTo(resized) else { fatalError("Directory navigation resized window") }
+        model.navigate(-1)
+        try await wait { !model.isLoading && model.frame != nil && model.index == 1 }
+        guard delegate.window.frame.equalTo(resized) else { fatalError("Previous image resized window") }
+        delegate.window.setFrame(beforeResize, display: true)
+        checks.append("Directory navigation preserves manually resized window")
         try await hover(canvas, point: NSPoint(x: 20, y: 60))
         let edgePoint = canvas.convert(NSPoint(x: 20, y: 60), to: nil)
         let beforeEdgeDrag = canvas.viewport.pan
@@ -485,12 +526,13 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try await wait { delegate.window.styleMask.contains(.fullScreen) }
         try await Task.sleep(for: .milliseconds(600)); try capture("editor-fullscreen")
         let fullScreenFrame = delegate.window.frame
+        delegate.window.fillScreen()
         doubleClickHeader()
         try await Task.sleep(for: .milliseconds(200))
         guard delegate.window.styleMask.contains(.fullScreen) && delegate.window.frame.equalTo(fullScreenFrame) else {
             fatalError("Header double-click changed fullscreen")
         }
-        checks.append("Header double-click leaves native fullscreen unchanged")
+        checks.append("Auto fill and header double-click leave native fullscreen unchanged")
         delegate.window.toggleFullScreen(nil)
         try await wait { !delegate.window.styleMask.contains(.fullScreen) }
         checks.append("Native fullscreen")

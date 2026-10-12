@@ -41,7 +41,7 @@ final class ViewerModel {
     var toolbarHovered = false
     var navigationHover = 0
     var loadingError: String?
-    weak var window: NSWindow?
+    weak var window: PicGlideWindow?
     @ObservationIgnored weak var canvas: CanvasView?
     @ObservationIgnored weak var toolbarCursorRegion: CursorRegionView?
 
@@ -86,17 +86,17 @@ final class ViewerModel {
         }
     }
 
-    func requestOpen(_ input: URL) {
+    func requestOpen(_ input: URL, fillWindow: Bool = true) {
         let url = input.standardizedFileURL.resolvingSymlinksInPath()
         guard ImageFormat.supports(url) else { showError(PicGlideError.unsupportedFormat); return }
-        confirmLeaving { [weak self] in self?.open(url) }
+        confirmLeaving { [weak self] in self?.open(url, fillWindow: fillWindow) }
     }
 
     func navigate(_ offset: Int) {
         guard !files.isEmpty, !isBusy else { return }
         let next = index + offset
         guard files.indices.contains(next) else { revealControls(); return }
-        requestOpen(files[next])
+        requestOpen(files[next], fillWindow: false)
     }
 
     func openPanel() {
@@ -109,7 +109,7 @@ final class ViewerModel {
         if panel.runModal() == .OK, let url = panel.url { requestOpen(url) }
     }
 
-    private func open(_ url: URL) {
+    private func open(_ url: URL, fillWindow: Bool) {
         loadTask?.cancel(); preloadTask?.cancel(); renderTask?.cancel(); resolutionTask?.cancel()
         renderTask = nil; resolutionTask = nil; preloadTask = nil
         generation = UUID(); imageID = UUID(); cancelGestureID = UUID()
@@ -128,6 +128,7 @@ final class ViewerModel {
                 saveFormat = ImageFormat.from(type: metadata.typeIdentifier)
                 multiFrame = metadata.frameCount > 1
                 isLoading = false
+                if fillWindow { window?.fillScreen() }
                 window?.title = url.lastPathComponent + " — PicGlide"
                 window?.isDocumentEdited = false
                 let neighbours = [index - 1, index + 1].filter { files.indices.contains($0) }.map { files[$0] }

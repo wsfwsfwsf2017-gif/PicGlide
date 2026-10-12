@@ -36,10 +36,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.delegate = self
         window.model = model
         window.contentView = NSHostingView(rootView: ViewerView(model: model))
-        window.center(); window.setFrameAutosaveName("PicGlideWindow")
+        window.center()
+        let initialSize = window.frame.size
+        window.setFrameAutosaveName("PicGlideWindow")
+        if let screen = window.screen, window.frame.equalTo(screen.visibleFrame) {
+            let area = screen.visibleFrame
+            let size = NSSize(width: min(initialSize.width, area.width), height: min(initialSize.height, area.height))
+            // Establish a restore size when the saved frame was already maximized.
+            window.setFrame(NSRect(x: area.midX - size.width / 2, y: area.midY - size.height / 2,
+                                   width: size.width, height: size.height), display: false)
+        }
         model.window = window
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        window.fillScreen()
         if model.currentURL == nil, let argument = CommandLine.arguments.dropFirst().first,
            !argument.hasPrefix("-") { model.requestOpen(URL(fileURLWithPath: argument)) }
         #if DEBUG
@@ -171,6 +181,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 @MainActor
 final class PicGlideWindow: NSWindow {
     weak var model: ViewerModel?
+
+    func fillScreen() {
+        guard !styleMask.contains(.fullScreen), let screen else { return }
+        let target = screen.visibleFrame
+        guard !frame.equalTo(target) else { return }
+        if isZoomed {
+            setFrame(target, display: true)
+        } else {
+            zoom(nil)
+        }
+    }
 
     func isHeaderLocation(_ point: NSPoint) -> Bool {
         guard let contentView else { return false }
