@@ -84,6 +84,26 @@ func runSmokeChecks(delegate: AppDelegate) async {
     func nativeControls(in view: NSView) -> [NSControl] {
         (view as? NSControl).map { [$0] } ?? view.subviews.flatMap(nativeControls)
     }
+    func navigationButton() -> CursorRegionView? {
+        CursorRegionView.regions(in: delegate.window.contentView!).first {
+            abs($0.cursorRect.width - 44) < 0.5 && abs($0.cursorRect.height - 56) < 0.5
+        }
+    }
+    func showNavigation(_ direction: Int, canvas: CanvasView) async throws -> CursorRegionView {
+        try await hover(canvas, point: NSPoint(x: direction < 0 ? 20 : canvas.bounds.maxX - 20, y: canvas.bounds.midY))
+        try await wait { navigationButton() != nil }
+        let button = navigationButton()!
+        try await hover(button)
+        let area = canvas.convert(button.cursorRect, from: button)
+        guard canvas.canvasCursorRects.allSatisfy({ $0.intersection(area).isEmpty }),
+              NSCursor.current === button.cursor else { fatalError("Navigation cursor overlaps canvas or fails to match button") }
+        return button
+    }
+    func clickNavigation() {
+        let button = navigationButton()!
+        let point = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil)
+        mouse(.leftMouseDown, at: point); mouse(.leftMouseUp, at: point)
+    }
     func saveButtonRect() -> NSRect {
         let region = cursorRegions(in: delegate.window.contentView!).first {
             abs($0.cursorRect.width - 52) < 0.5 && abs($0.cursorRect.height - 32) < 0.5
@@ -213,6 +233,64 @@ func runSmokeChecks(delegate: AppDelegate) async {
         }
         let mousePosition = CGEvent(source: nil)!.location
         defer { CGWarpMouseCursorPosition(mousePosition) }
+        let navigationFolder = output.appendingPathComponent("navigation")
+        let singleFolder = navigationFolder.appendingPathComponent("single")
+        try FileManager.default.createDirectory(at: singleFolder, withIntermediateDirectories: true)
+        for name in ["01.png", "02.png", "03.png"] {
+            try ImageFiles.save(image: image, format: .png, to: navigationFolder.appendingPathComponent(name))
+        }
+        let singleImage = singleFolder.appendingPathComponent("only.png")
+        try ImageFiles.save(image: image, format: .png, to: singleImage)
+        model.requestOpen(navigationFolder.appendingPathComponent("01.png"))
+        try await wait { !model.isLoading && model.frame != nil && model.files.count == 3 }
+        try await hover(canvas)
+        try await Task.sleep(for: .milliseconds(150))
+        guard navigationButton() == nil else { fatalError("Navigation visible in canvas center") }
+        let left = try await showNavigation(-1, canvas: canvas)
+        guard left.cursor === NSCursor.arrow else { fatalError("First image previous button is enabled") }
+        clickNavigation(); try await Task.sleep(for: .milliseconds(150))
+        guard model.index == 0 else { fatalError("Previous button wrapped before first image") }
+        checks.append("Edge navigation hides in center and disables previous at first image")
+        let right = try await showNavigation(1, canvas: canvas)
+        guard right.cursor === NSCursor.pointingHand else { fatalError("Next button is not clickable") }
+        try capture("viewer-edge-navigation")
+        let beforeNavigationPan = canvas.viewport.pan
+        clickNavigation()
+        try await wait { !model.isLoading && model.frame != nil && model.index == 1 && navigationButton() != nil }
+        guard canvas.viewport.pan == beforeNavigationPan else { fatalError("Navigation click panned image") }
+        clickNavigation()
+        try await wait { !model.isLoading && model.frame != nil && model.index == 2 && navigationButton() != nil }
+        try await hover(navigationButton()!)
+        guard navigationButton()!.cursor === NSCursor.arrow else { fatalError("Last image next button is enabled") }
+        clickNavigation(); try await Task.sleep(for: .milliseconds(150))
+        guard model.index == 2 else { fatalError("Next button wrapped after last image") }
+        checks.append("Native next button supports repeated clicks without moving pointer and stops at last image")
+        _ = try await showNavigation(-1, canvas: canvas)
+        clickNavigation()
+        try await wait { !model.isLoading && model.frame != nil && model.index == 1 }
+        checks.append("Native previous button navigates backward")
+        try await hover(canvas, point: NSPoint(x: 20, y: 60))
+        let edgePoint = canvas.convert(NSPoint(x: 20, y: 60), to: nil)
+        let beforeEdgeDrag = canvas.viewport.pan
+        mouse(.leftMouseDown, at: edgePoint)
+        try await Task.sleep(for: .milliseconds(80))
+        mouse(.leftMouseDragged, at: NSPoint(x: edgePoint.x + 18, y: edgePoint.y + 12))
+        try await Task.sleep(for: .milliseconds(80))
+        mouse(.leftMouseUp, at: NSPoint(x: edgePoint.x + 18, y: edgePoint.y + 12))
+        try await Task.sleep(for: .milliseconds(100))
+        guard canvas.viewport.pan != beforeEdgeDrag else { fatalError("Edge hover blocked canvas drag outside navigation button") }
+        checks.append("Canvas remains draggable in edge hover area outside navigation button")
+        model.requestOpen(singleImage)
+        try await wait { !model.isLoading && model.frame != nil && model.files.count == 1 }
+        for direction in [-1, 1] {
+            try await hover(canvas, point: NSPoint(x: direction < 0 ? 20 : canvas.bounds.maxX - 20, y: canvas.bounds.midY))
+            try await Task.sleep(for: .milliseconds(150))
+            guard model.navigationHover == 0 && navigationButton() == nil else { fatalError("Single-image folder shows navigation") }
+        }
+        checks.append("Single-image folder hides both edge navigation buttons")
+        model.requestOpen(fixture)
+        try await wait { !model.isLoading && model.frame != nil && model.currentURL == fixture }
+        try await hover(canvas)
         try await checkHeaderFill("Image window header fills desktop and restores frame")
         try await checkToolbarCursor(canvas, label: "Viewer native mouse: clickable hand, disabled/background arrow, canvas hand")
         let beforeWindowDrag = delegate.window.frame
@@ -278,6 +356,10 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try await Task.sleep(for: .milliseconds(100))
         model.chooseTool(.pencil); canvas.update()
         try await Task.sleep(for: .milliseconds(150))
+        try await hover(canvas, point: NSPoint(x: 20, y: canvas.bounds.midY))
+        guard navigationButton() == nil && model.navigationHover == 0,
+              NSCursor.current === NSCursor.crosshair else { fatalError("Editing shows edge navigation or hides drawing cursor") }
+        checks.append("Editor hides edge navigation and preserves drawing cursor")
         let cleanSaveRect = saveButtonRect()
         guard !model.canSave else { fatalError("Save enabled on clean image") }
         try await checkHeaderFill("Editing window header fills desktop and restores frame")
@@ -338,6 +420,16 @@ func runSmokeChecks(delegate: AppDelegate) async {
               model.history.operations == editedOperations,
               try Data(contentsOf: fixture) == fileBeforeExit else { fatalError("Return to browse lost or saved edits") }
         try capture("viewer-unsaved")
+        let dialog = output.appendingPathComponent("unsaved-dialog.png")
+        try FileManager.default.removeItem(at: dialog)
+        _ = try await showNavigation(1, canvas: canvas)
+        respondToAlert("取消")
+        clickNavigation()
+        try await wait { FileManager.default.fileExists(atPath: dialog.path) && NSApp.modalWindow == nil }
+        guard model.currentURL == fixture, model.isDirty,
+              model.history.operations == editedOperations,
+              try Data(contentsOf: fixture) == fileBeforeExit else { fatalError("Edge navigation bypassed unsaved-edit protection") }
+        checks.append("Edge button triggers unsaved prompt and cancel preserves edits and file")
         model.toggleEditing(); model.chooseTool(.pencil); canvas.update()
         checks.append("Return to browse preserves unsaved edits without writing file")
         model.chooseTool(.rectangle); canvas.update()

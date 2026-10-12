@@ -79,18 +79,13 @@ final class CursorRegionView: NSView {
         if let canvas = model.canvas { canvas.window?.invalidateCursorRects(for: canvas) }
     }
 
+    static func regions(in view: NSView) -> [CursorRegionView] {
+        guard !view.isHidden else { return [] }
+        return ((view as? CursorRegionView).map { [$0] } ?? []) + view.subviews.flatMap { regions(in: $0) }
+    }
+
     static func cursor(at point: NSPoint, in root: NSView) -> NSCursor? {
-        var match: CursorRegionView?
-        func visit(_ view: NSView) {
-            guard !view.isHidden else { return }
-            if let region = view as? CursorRegionView,
-               region.convert(region.cursorRect, to: nil).contains(point),
-               match == nil || region.cursorRect.width * region.cursorRect.height < match!.cursorRect.width * match!.cursorRect.height {
-                match = region
-            }
-            for child in view.subviews { visit(child) }
-        }
-        visit(root)
-        return match?.cursor
+        regions(in: root).filter { $0.convert($0.cursorRect, to: nil).contains(point) }
+            .min { $0.cursorRect.width * $0.cursorRect.height < $1.cursorRect.width * $1.cursorRect.height }?.cursor
     }
 }

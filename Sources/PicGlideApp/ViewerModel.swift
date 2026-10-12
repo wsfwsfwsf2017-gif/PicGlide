@@ -39,6 +39,7 @@ final class ViewerModel {
     var zoomPercentage: Double = 100
     var controlsVisible = true
     var toolbarHovered = false
+    var navigationHover = 0
     var loadingError: String?
     weak var window: NSWindow?
     @ObservationIgnored weak var canvas: CanvasView?

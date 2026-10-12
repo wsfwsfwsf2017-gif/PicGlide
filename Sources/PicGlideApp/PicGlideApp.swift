@@ -82,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     func windowDidResignKey(_ notification: Notification) {
         model.cancelGestureID = UUID()
+        model.navigationHover = 0
     }
 
     func windowWillUseStandardFrame(_ window: NSWindow, defaultFrame newFrame: NSRect) -> NSRect {
@@ -197,8 +198,10 @@ final class PicGlideWindow: NSWindow {
         super.sendEvent(event)
         switch event.type {
         case .mouseMoved, .leftMouseUp:
+            model?.canvas?.updateNavigationHover(at: event.locationInWindow)
             updateCursor(at: event.locationInWindow)
         case .cursorUpdate, .mouseEntered, .mouseExited:
+            model?.canvas?.updateNavigationHover(at: mouseLocationOutsideOfEventStream)
             updateCursor(at: mouseLocationOutsideOfEventStream)
         case .leftMouseDragged:
             if model?.canvas?.canvasCursor === NSCursor.closedHand { NSCursor.closedHand.set() }
@@ -208,10 +211,9 @@ final class PicGlideWindow: NSWindow {
 
     private func updateCursor(at point: NSPoint) {
         guard isKeyWindow, let canvas = model?.canvas else { return }
-        if let toolbar = model?.toolbarCursorRegion,
-           toolbar.convert(toolbar.cursorRect, to: nil).contains(point), let contentView {
+        if let contentView, let cursor = CursorRegionView.cursor(at: point, in: contentView) {
             // SwiftUI hosting views can replace cursor rects registered by their transparent backgrounds.
-            (CursorRegionView.cursor(at: point, in: contentView) ?? .arrow).set()
+            cursor.set()
         } else if canvas.convert(canvas.visibleRect.intersection(canvas.bounds), to: nil).contains(point) {
             canvas.canvasCursor.set()
         }

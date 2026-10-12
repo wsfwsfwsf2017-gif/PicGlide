@@ -14,6 +14,15 @@ struct ViewerView: View {
             canvasColor
             ImageCanvas(model: model)
                 .padding(.top, 40)
+            if model.frame != nil, model.files.count > 1, !model.isEditing, !model.isBusy {
+                if model.navigationHover != 0 {
+                    navigationButton(model.navigationHover)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity,
+                               alignment: model.navigationHover < 0 ? .leading : .trailing)
+                        .padding(.horizontal, 16).padding(.top, 40)
+                        .transition(.opacity)
+                }
+            }
             if model.frame == nil && !model.isLoading { emptyView }
             if model.isLoading || model.isPreparingEdit || model.isSaving {
                 VStack(spacing: 12) {
@@ -38,6 +47,22 @@ struct ViewerView: View {
         }
         .ignoresSafeArea()
         .frame(minWidth: 600, minHeight: 400)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: model.navigationHover)
+    }
+
+    private func navigationButton(_ direction: Int) -> some View {
+        let previous = direction < 0
+        let enabled = previous ? model.index > 0 : model.index + 1 < model.files.count
+        let title = previous ? "上一张" : "下一张"
+        return Button { model.navigate(direction) } label: {
+            Image(systemName: previous ? "chevron.left" : "chevron.right")
+                .font(.system(size: 19, weight: .medium)).frame(width: 44, height: 56)
+        }
+        .buttonStyle(ClickableButtonStyle()).disabled(!enabled || model.isLoading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.primary.opacity(0.08)))
+        .shadow(color: .black.opacity(0.1), radius: 8, y: 3)
+        .help(title).accessibilityLabel(title)
     }
 
     private var emptyView: some View {

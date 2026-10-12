@@ -105,15 +105,35 @@ final class CanvasView: NSView {
 
     var canvasCursorRects: [NSRect] {
         let area = visibleRect.intersection(bounds)
-        guard let toolbar = model.toolbarCursorRegion, toolbar.window === window else { return [area] }
-        let overlap = convert(toolbar.cursorRect, from: toolbar).intersection(area)
-        guard !overlap.isEmpty else { return [area] }
-        return [
-            NSRect(x: area.minX, y: area.minY, width: area.width, height: overlap.minY - area.minY),
-            NSRect(x: area.minX, y: overlap.maxY, width: area.width, height: area.maxY - overlap.maxY),
-            NSRect(x: area.minX, y: overlap.minY, width: overlap.minX - area.minX, height: overlap.height),
-            NSRect(x: overlap.maxX, y: overlap.minY, width: area.maxX - overlap.maxX, height: overlap.height)
-        ].filter { !$0.isEmpty }
+        guard let root = window?.contentView else { return [area] }
+        let exclusions = CursorRegionView.regions(in: root).map { convert($0.cursorRect, from: $0) }
+            .sorted { $0.width * $0.height > $1.width * $1.height }
+        var rects = [area]
+        for exclusion in exclusions {
+            rects = rects.flatMap { rect in
+                let overlap = exclusion.intersection(rect)
+                guard !overlap.isEmpty else { return [rect] }
+                return [
+                    NSRect(x: rect.minX, y: rect.minY, width: rect.width, height: overlap.minY - rect.minY),
+                    NSRect(x: rect.minX, y: overlap.maxY, width: rect.width, height: rect.maxY - overlap.maxY),
+                    NSRect(x: rect.minX, y: overlap.minY, width: overlap.minX - rect.minX, height: overlap.height),
+                    NSRect(x: overlap.maxX, y: overlap.minY, width: rect.maxX - overlap.maxX, height: overlap.height)
+                ].filter { !$0.isEmpty }
+            }
+        }
+        return rects
+    }
+
+    func updateNavigationHover(at point: NSPoint) {
+        let local = convert(point, from: nil)
+        let overToolbar = model.toolbarCursorRegion.map { $0.convert($0.cursorRect, to: nil).contains(point) } ?? false
+        var direction = 0
+        if window?.isKeyWindow == true, bounds.contains(local), model.files.count > 1,
+           !model.isEditing, !model.isBusy, !isPanning, !overToolbar {
+            if local.x < 72 { direction = -1 }
+            else if local.x > bounds.maxX - 72 { direction = 1 }
+        }
+        if model.navigationHover != direction { model.navigationHover = direction }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -167,6 +187,7 @@ final class CanvasView: NSView {
     override func mouseDown(with event: NSEvent) {
         guard model.frame != nil, !model.isBusy else { return }
         window?.makeFirstResponder(self); model.revealControls()
+        model.navigationHover = 0
         let point = convert(event.locationInWindow, from: nil)
         isPanning = !model.isEditing || model.tool == .hand || spaceHeld
         if isPanning {
