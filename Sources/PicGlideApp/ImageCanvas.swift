@@ -30,6 +30,7 @@ final class CanvasView: NSView {
     init(model: ViewerModel) {
         self.model = model
         super.init(frame: .zero)
+        model.canvas = self
         registerForDraggedTypes([.fileURL])
         setAccessibilityElement(true)
         setAccessibilityRole(.image)
@@ -93,7 +94,26 @@ final class CanvasView: NSView {
     }
 
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: !model.isEditing || model.tool == .hand || spaceHeld ? .openHand : .crosshair)
+        for rect in canvasCursorRects { addCursorRect(rect, cursor: canvasCursor) }
+    }
+
+    var canvasCursor: NSCursor {
+        if model.frame == nil || model.isBusy { return .arrow }
+        if isPanning { return .closedHand }
+        return !model.isEditing || model.tool == .hand || spaceHeld ? .openHand : .crosshair
+    }
+
+    var canvasCursorRects: [NSRect] {
+        let area = visibleRect.intersection(bounds)
+        guard let toolbar = model.toolbarCursorRegion, toolbar.window === window else { return [area] }
+        let overlap = convert(toolbar.cursorRect, from: toolbar).intersection(area)
+        guard !overlap.isEmpty else { return [area] }
+        return [
+            NSRect(x: area.minX, y: area.minY, width: area.width, height: overlap.minY - area.minY),
+            NSRect(x: area.minX, y: overlap.maxY, width: area.width, height: area.maxY - overlap.maxY),
+            NSRect(x: area.minX, y: overlap.minY, width: overlap.minX - area.minX, height: overlap.height),
+            NSRect(x: overlap.maxX, y: overlap.minY, width: area.maxX - overlap.maxX, height: overlap.height)
+        ].filter { !$0.isEmpty }
     }
 
     override func draw(_ dirtyRect: NSRect) {

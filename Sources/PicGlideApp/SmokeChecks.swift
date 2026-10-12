@@ -9,6 +9,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
     let output = URL(fileURLWithPath: path)
     var checks: [String] = []
     var measurements: [String: Any] = [:]
+    var passed = false
     func residentMiB() -> Double {
         var info = mach_task_basic_info()
         var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size)
@@ -53,6 +54,83 @@ func runSmokeChecks(delegate: AppDelegate) async {
             default: canvas.mouseUp(with: event) }
         }
     }
+    func doubleClickHeader() {
+        let event = NSEvent.mouseEvent(with: .leftMouseDown,
+            location: CGPoint(x: delegate.window.frame.width / 2, y: delegate.window.frame.height - 16),
+            modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: delegate.window.windowNumber, context: nil, eventNumber: 1, clickCount: 2, pressure: 1)!
+        delegate.window.sendEvent(event)
+    }
+    func checkHeaderFill(_ label: String) async throws {
+        let original = delegate.window.frame
+        let available = delegate.window.screen!.visibleFrame
+        doubleClickHeader()
+        try await Task.sleep(for: .milliseconds(400))
+        guard delegate.window.frame.equalTo(available) else {
+            throw NSError(domain: "PicGlideSmoke", code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "Header double-click did not fill desktop: \(delegate.window.frame)"])
+        }
+        doubleClickHeader()
+        try await Task.sleep(for: .milliseconds(400))
+        guard delegate.window.frame.equalTo(original) else {
+            throw NSError(domain: "PicGlideSmoke", code: 4,
+                userInfo: [NSLocalizedDescriptionKey: "Header double-click did not restore window"])
+        }
+        checks.append(label)
+    }
+    func cursorRegions(in view: NSView) -> [CursorRegionView] {
+        (view as? CursorRegionView).map { [$0] } ?? view.subviews.flatMap(cursorRegions)
+    }
+    func nativeControls(in view: NSView) -> [NSControl] {
+        (view as? NSControl).map { [$0] } ?? view.subviews.flatMap(nativeControls)
+    }
+    func mouse(_ type: CGEventType, at point: NSPoint) {
+        let screenPoint = delegate.window.convertPoint(toScreen: point)
+        let location = CGPoint(x: screenPoint.x, y: NSScreen.screens[0].frame.maxY - screenPoint.y)
+        let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: location, mouseButton: .left)!
+        event.setIntegerValueField(.mouseEventClickState, value: 1)
+        event.post(tap: .cghidEventTap)
+    }
+    func hover(_ view: NSView, point: NSPoint? = nil) async throws {
+        for _ in 0..<3 {
+            delegate.window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            try await Task.sleep(for: .milliseconds(50))
+            let target = view.convert(point ?? NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil)
+            mouse(.mouseMoved, at: target)
+            try await Task.sleep(for: .milliseconds(100))
+            let actual = delegate.window.mouseLocationOutsideOfEventStream
+            // Retry only when external mouse movement or focus changes interrupted the input.
+            if NSApp.isActive && delegate.window.isKeyWindow && hypot(actual.x - target.x, actual.y - target.y) < 5 { return }
+        }
+        throw NSError(domain: "PicGlideSmoke", code: 7,
+            userInfo: [NSLocalizedDescriptionKey: "Native pointer check interrupted by mouse movement or focus changes"])
+    }
+    func checkToolbarCursor(_ canvas: CanvasView, label: String) async throws {
+        guard let toolbar = delegate.model.toolbarCursorRegion else { fatalError("Toolbar cursor region missing") }
+        let toolbarArea = canvas.convert(toolbar.cursorRect, from: toolbar)
+        guard canvas.canvasCursorRects.allSatisfy({ $0.intersection(toolbarArea).isEmpty }) else {
+            fatalError("Canvas cursor overlaps toolbar")
+        }
+        let regions = cursorRegions(in: delegate.window.contentView!)
+        guard let button = regions.first(where: { $0.cursor === NSCursor.pointingHand && !$0.cursorRect.isEmpty }) else {
+            fatalError("No clickable cursor region")
+        }
+        try await hover(button)
+        guard NSCursor.current === NSCursor.pointingHand else {
+            throw NSError(domain: "PicGlideSmoke", code: 5, userInfo: [NSLocalizedDescriptionKey:
+                "Button hover is not pointing hand: arrow=\(NSCursor.current === NSCursor.arrow), active=\(NSApp.isActive), key=\(delegate.window.isKeyWindow), frame=\(button.convert(button.bounds, to: nil)), mouse=\(delegate.window.mouseLocationOutsideOfEventStream), toolbar=\(toolbar.convert(toolbar.cursorRect, to: nil)), selected=\(CursorRegionView.cursor(at: delegate.window.mouseLocationOutsideOfEventStream, in: delegate.window.contentView!) === NSCursor.pointingHand)"])
+        }
+        if let disabled = regions.first(where: { $0 !== toolbar && $0.cursor === NSCursor.arrow && !$0.cursorRect.isEmpty }) {
+            try await hover(disabled)
+            guard NSCursor.current === NSCursor.arrow else { fatalError("Disabled button hover is not arrow") }
+        }
+        try await hover(toolbar, point: NSPoint(x: 4, y: toolbar.bounds.midY))
+        guard NSCursor.current === NSCursor.arrow else { fatalError("Toolbar background hover is not arrow") }
+        try await hover(canvas)
+        guard NSCursor.current === canvas.canvasCursor else { fatalError("Canvas cursor did not restore") }
+        checks.append(label)
+    }
     func respondToAlert(_ title: String) {
         let timer = Timer(timeInterval: 0.2, repeats: false) { _ in
             MainActor.assumeIsolated {
@@ -76,6 +154,23 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         try? FileManager.default.removeItem(at: output.appendingPathComponent("ui-report.json"))
         try? FileManager.default.removeItem(at: output.appendingPathComponent("failure.txt"))
+        try await checkHeaderFill("Empty window header fills desktop and restores frame")
+        let originalFrame = delegate.window.frame
+        for screen in NSScreen.screens {
+            delegate.window.setFrame(screen.visibleFrame.insetBy(dx: 100, dy: 100), display: true)
+            try await checkHeaderFill("Header fill and restore on \(screen.localizedName)")
+        }
+        delegate.window.setFrame(originalFrame, display: true)
+        let viewerWindow = delegate.window!
+        for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            let button = delegate.window.standardWindowButton(type)!
+            let center = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil)
+            guard !viewerWindow.isHeaderLocation(center) else { fatalError("Titlebar includes window button") }
+        }
+        guard !viewerWindow.isHeaderLocation(NSPoint(x: originalFrame.width / 2, y: 100)) else {
+            fatalError("Canvas included in header")
+        }
+        checks.append("Header excludes traffic-light buttons and canvas")
         let context = try ImageRenderer.context(width: 1800, height: 1200)
         let colors = [CGColor(red: 0.08, green: 0.2, blue: 0.34, alpha: 1),
                       CGColor(red: 0.24, green: 0.53, blue: 0.67, alpha: 1),
@@ -101,6 +196,38 @@ func runSmokeChecks(delegate: AppDelegate) async {
         guard let canvas = findCanvas(delegate.window.contentView!) else {
             throw NSError(domain: "PicGlideSmoke", code: 2, userInfo: [NSLocalizedDescriptionKey: "Canvas not attached"])
         }
+        let mousePosition = CGEvent(source: nil)!.location
+        defer { CGWarpMouseCursorPosition(mousePosition) }
+        try await checkHeaderFill("Image window header fills desktop and restores frame")
+        try await checkToolbarCursor(canvas, label: "Viewer native mouse: clickable hand, disabled/background arrow, canvas hand")
+        let beforeWindowDrag = delegate.window.frame
+        let headerPoint = NSPoint(x: beforeWindowDrag.width / 2, y: beforeWindowDrag.height - 16)
+        let beforeHeaderPan = canvas.viewport.pan
+        mouse(.mouseMoved, at: headerPoint)
+        mouse(.leftMouseDown, at: headerPoint)
+        try await Task.sleep(for: .milliseconds(100))
+        mouse(.leftMouseDragged, at: NSPoint(x: headerPoint.x + 30, y: headerPoint.y - 12))
+        try await Task.sleep(for: .milliseconds(100))
+        mouse(.leftMouseUp, at: headerPoint)
+        try await Task.sleep(for: .milliseconds(100))
+        guard delegate.window.frame.origin != beforeWindowDrag.origin && canvas.viewport.pan == beforeHeaderPan else {
+            throw NSError(domain: "PicGlideSmoke", code: 6, userInfo: [NSLocalizedDescriptionKey: "Native titlebar drag did not move only the window"])
+        }
+        delegate.window.setFrame(beforeWindowDrag, display: true)
+        checks.append("Native header drag moves window without panning image")
+        let canvasPoint = canvas.convert(NSPoint(x: canvas.bounds.midX, y: canvas.bounds.midY), to: nil)
+        let beforeNativePan = canvas.viewport.pan
+        mouse(.leftMouseDown, at: canvasPoint)
+        try await Task.sleep(for: .milliseconds(100))
+        guard NSCursor.current === NSCursor.closedHand else { fatalError("Native pan did not close hand cursor") }
+        mouse(.leftMouseDragged, at: NSPoint(x: canvasPoint.x + 15, y: canvasPoint.y + 12))
+        try await Task.sleep(for: .milliseconds(100))
+        mouse(.leftMouseUp, at: NSPoint(x: canvasPoint.x + 15, y: canvasPoint.y + 12))
+        try await Task.sleep(for: .milliseconds(100))
+        guard canvas.viewport.pan != beforeNativePan && NSCursor.current === NSCursor.openHand else {
+            fatalError("Native pan did not move image and restore open hand")
+        }
+        checks.append("Native canvas drag uses closed hand and restores open hand")
         delegate.window.appearance = NSAppearance(named: .darkAqua)
         model.revealControls(); try await Task.sleep(for: .milliseconds(200)); try capture("viewer-dark")
         delegate.window.appearance = NSAppearance(named: .aqua)
@@ -123,10 +250,56 @@ func runSmokeChecks(delegate: AppDelegate) async {
         key(123, canvas: canvas)
         try await wait { !model.isLoading && model.currentURL == fixture }
         model.setZoom(actualSize: false)
-        model.toggleEditing()
+        canvas.update()
+        let editButton = cursorRegions(in: delegate.window.contentView!)
+            .filter { $0.cursor === NSCursor.pointingHand }
+            .max { $0.convert(.zero, to: nil).x < $1.convert(.zero, to: nil).x }!
+        let panBeforeClick = canvas.viewport.pan
+        let buttonCenter = editButton.convert(NSPoint(x: editButton.bounds.midX, y: editButton.bounds.midY), to: nil)
+        mouse(.leftMouseDown, at: buttonCenter); mouse(.leftMouseUp, at: buttonCenter)
         try await wait { model.isEditing && !model.isPreparingEdit }
+        guard canvas.viewport.pan == panBeforeClick else { fatalError("Toolbar click panned image") }
+        checks.append("Native toolbar button click enters editor without panning image")
         try await Task.sleep(for: .milliseconds(100))
         model.chooseTool(.pencil); canvas.update()
+        try await checkHeaderFill("Editing window header fills desktop and restores frame")
+        try await checkToolbarCursor(canvas, label: "Editor native mouse restores crosshair outside controls")
+        key(49, canvas: canvas)
+        try await hover(canvas)
+        guard NSCursor.current === NSCursor.openHand else { fatalError("Space did not switch cursor to hand") }
+        key(49, canvas: canvas, up: true)
+        try await hover(canvas)
+        guard NSCursor.current === NSCursor.crosshair else { fatalError("Space release did not restore crosshair") }
+        checks.append("Space temporarily changes editor cursor to hand")
+        let controls = nativeControls(in: delegate.window.contentView!)
+        measurements["editorNativeControls"] = controls.map { String(describing: type(of: $0)) }
+        for control in controls where control is NSSlider || control is NSColorWell {
+            try await hover(control)
+            guard NSCursor.current === NSCursor.arrow else { fatalError("Native editor control cursor is not arrow") }
+        }
+        let sliders = cursorRegions(in: delegate.window.contentView!).filter {
+            $0.cursor === NSCursor.arrow && $0.cursorRect.width > 80 && $0.cursorRect.height < 30
+        }
+        guard sliders.count == 2 else { fatalError("Editor slider cursor regions missing") }
+        for slider in sliders {
+            try await hover(slider)
+            guard NSCursor.current === NSCursor.arrow else { fatalError("Slider hover did not use arrow") }
+        }
+        let widthSlider = sliders.first { abs($0.cursorRect.width - 94) < 1 }!
+        let sliderPoint = widthSlider.convert(NSPoint(x: widthSlider.bounds.width * 0.75, y: widthSlider.bounds.midY), to: nil)
+        let originalWidth = model.lineWidth
+        mouse(.leftMouseDown, at: sliderPoint); mouse(.leftMouseUp, at: sliderPoint)
+        try await wait { model.lineWidth != originalWidth }
+        model.lineWidth = originalWidth
+        checks.append("Native slider hover uses arrow and click changes brush width")
+        if let colorWell = controls.first(where: { $0 is NSColorWell }) as? NSColorWell {
+            colorWell.performClick(nil)
+            try await wait { NSColorPanel.shared.isVisible }
+            NSColorPanel.shared.close()
+            try await hover(canvas)
+            guard NSCursor.current === NSCursor.crosshair else { fatalError("Color panel close did not restore canvas cursor") }
+            checks.append("Native color picker and panel close preserve cursor behavior")
+        }
         let a = canvas.viewport.viewPoint(from: CGPoint(x: 200, y: 220))
         let b = canvas.viewport.viewPoint(from: CGPoint(x: 600, y: 380))
         drag(a, b, canvas: canvas)
@@ -161,6 +334,13 @@ func runSmokeChecks(delegate: AppDelegate) async {
         delegate.window.toggleFullScreen(nil)
         try await wait { delegate.window.styleMask.contains(.fullScreen) }
         try await Task.sleep(for: .milliseconds(600)); try capture("editor-fullscreen")
+        let fullScreenFrame = delegate.window.frame
+        doubleClickHeader()
+        try await Task.sleep(for: .milliseconds(200))
+        guard delegate.window.styleMask.contains(.fullScreen) && delegate.window.frame.equalTo(fullScreenFrame) else {
+            fatalError("Header double-click changed fullscreen")
+        }
+        checks.append("Header double-click leaves native fullscreen unchanged")
         delegate.window.toggleFullScreen(nil)
         try await wait { !delegate.window.styleMask.contains(.fullScreen) }
         checks.append("Native fullscreen")
@@ -188,6 +368,8 @@ func runSmokeChecks(delegate: AppDelegate) async {
         canvas.mouseMoved(with: movement)
         guard model.controlsVisible, delegate.window.acceptsMouseMovedEvents else { fatalError("Toolbar reveal failed") }
         checks.append("Toolbar hides after idle and reappears on mouse movement")
+        try await Task.sleep(for: .milliseconds(250))
+        try await checkToolbarCursor(canvas, label: "Cursor regions restore after toolbar hide and reveal")
 
         if ProcessInfo.processInfo.environment["PICGLIDE_PROFILE"] == "1" {
             let folder = output.appendingPathComponent("performance")
@@ -242,10 +424,12 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
             .write(to: output.appendingPathComponent("ui-report.json"))
         print("PICGLIDE_UI_SMOKE_PASS \(checks.count) checks")
+        passed = true
     } catch {
         try? error.localizedDescription.write(to: output.appendingPathComponent("failure.txt"), atomically: true, encoding: .utf8)
         print("PICGLIDE_UI_SMOKE_FAIL \(error)")
     }
+    if !passed { exit(EXIT_FAILURE) }
     delegate.model.history.markSaved()
     NSApp.terminate(nil)
 }

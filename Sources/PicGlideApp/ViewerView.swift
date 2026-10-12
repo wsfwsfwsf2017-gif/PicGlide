@@ -61,7 +61,7 @@ struct ViewerView: View {
                     Text("⌘O").foregroundStyle(.white.opacity(0.65))
                 }.padding(.horizontal, 18).padding(.vertical, 10)
             }
-            .buttonStyle(.plain).foregroundStyle(.white)
+            .buttonStyle(ClickableButtonStyle()).foregroundStyle(.white)
             .background(.blue, in: Capsule())
             .help("打开图片（⌘O）")
             Text("拖动移动  ·  滚轮缩放  ·  方向键切换")
@@ -98,7 +98,7 @@ struct ViewerView: View {
                             .frame(width: 52, height: 48)
                             .foregroundStyle(model.tool == tool ? Color.white : Color.primary.opacity(0.75))
                             .background(model.tool == tool ? Color.blue : .clear, in: RoundedRectangle(cornerRadius: 11))
-                        }.buttonStyle(.plain).help(tool.title).accessibilityLabel(tool.title)
+                        }.buttonStyle(ClickableButtonStyle()).help(tool.title).accessibilityLabel(tool.title)
                     }
                     separator
                     iconButton("撤销", symbol: "arrow.uturn.backward", enabled: model.canUndo, action: model.undo)
@@ -124,18 +124,19 @@ struct ViewerView: View {
                     Label(model.isEditing ? "完成" : "编辑", systemImage: model.isEditing ? "checkmark" : "slider.horizontal.3")
                         .font(.system(size: 12, weight: .medium)).padding(.horizontal, 10).frame(height: 30)
                         .background(model.isEditing ? Color.blue.opacity(0.12) : Color.primary.opacity(0.06), in: Capsule())
-                }.buttonStyle(.plain).help("切换编辑（⌘E）")
+                }.buttonStyle(ClickableButtonStyle()).help("切换编辑（⌘E）")
                 if model.isDirty {
                     Button { model.save() } label: {
                         Label("保存", systemImage: "square.and.arrow.down")
                             .font(.system(size: 12, weight: .medium)).padding(.horizontal, 11).frame(height: 30)
                             .foregroundStyle(.white).background(.blue, in: Capsule())
-                    }.buttonStyle(.plain).help("覆盖保存（⌘S）")
+                    }.buttonStyle(ClickableButtonStyle()).help("覆盖保存（⌘S）")
                 }
             }
             .padding(.horizontal, 14).padding(.vertical, 10)
         }
         .fixedSize(horizontal: true, vertical: false)
+        .background(CursorRegion(cursor: .arrow, model: model))
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
         .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.12 : 0.45)))
         .shadow(color: .black.opacity(colorScheme == .dark ? 0.28 : 0.12), radius: 18, y: 7)
@@ -152,22 +153,26 @@ struct ViewerView: View {
             HStack(spacing: 12) {
                 Text("拖出保留区域 · Esc 取消").font(.system(size: 11)).foregroundStyle(.secondary)
                 Button("应用裁剪 ↵", action: model.applyCrop)
-                    .buttonStyle(.borderedProminent).controlSize(.small).disabled(model.pendingCrop == nil)
+                    .buttonStyle(.borderedProminent).controlSize(.small)
+                    .background(CursorRegion(cursor: .pointingHand)).disabled(model.pendingCrop == nil)
             }.frame(height: 22)
         case .mosaic:
             HStack(spacing: 12) {
                 Text("颗粒").font(.system(size: 11)).foregroundStyle(.secondary)
-                Slider(value: $model.blockSize, in: 4...64, step: 1).frame(width: 190).accessibilityLabel("马赛克颗粒大小")
+                Slider(value: $model.blockSize, in: 4...64, step: 1).frame(width: 190)
+                    .background(CursorRegion(cursor: .arrow)).accessibilityLabel("马赛克颗粒大小")
                 Text("\(Int(model.blockSize)) px").font(.system(size: 10, design: .monospaced)).frame(width: 42)
             }.frame(height: 22)
         case .pencil, .rectangle:
             HStack(spacing: 9) {
                 ColorPicker("颜色", selection: $model.color, supportsOpacity: false).labelsHidden().frame(width: 30)
                 Text("粗细").font(.system(size: 11)).foregroundStyle(.secondary)
-                Slider(value: $model.lineWidth, in: 1...64, step: 1).frame(width: 94).accessibilityLabel("线条粗细")
+                Slider(value: $model.lineWidth, in: 1...64, step: 1).frame(width: 94)
+                    .background(CursorRegion(cursor: .arrow)).accessibilityLabel("线条粗细")
                 Text("\(Int(model.lineWidth))").font(.system(size: 10, design: .monospaced)).frame(width: 19)
                 Text("透明度").font(.system(size: 11)).foregroundStyle(.secondary)
-                Slider(value: $model.opacity, in: 0.05...1).frame(width: 88).accessibilityLabel("线条透明度")
+                Slider(value: $model.opacity, in: 0.05...1).frame(width: 88)
+                    .background(CursorRegion(cursor: .arrow)).accessibilityLabel("线条透明度")
                 Text("\(Int(model.opacity * 100))%")
                     .font(.system(size: 10, design: .monospaced)).frame(width: 33)
             }.frame(height: 22)
@@ -178,7 +183,7 @@ struct ViewerView: View {
 
     private func iconButton(_ title: String, symbol: String, enabled: Bool = true, action: @escaping () -> Void) -> some View {
         Button(action: action) { Image(systemName: symbol).font(.system(size: 13, weight: .medium)).frame(width: 26, height: 30) }
-            .buttonStyle(.plain).disabled(!enabled).foregroundStyle(enabled ? .primary : .tertiary)
+            .buttonStyle(ClickableButtonStyle()).disabled(!enabled).foregroundStyle(enabled ? .primary : .tertiary)
             .help(title).accessibilityLabel(title)
     }
 }

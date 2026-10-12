@@ -41,6 +41,8 @@ final class ViewerModel {
     var toolbarHovered = false
     var loadingError: String?
     weak var window: NSWindow?
+    @ObservationIgnored weak var canvas: CanvasView?
+    @ObservationIgnored weak var toolbarCursorRegion: CursorRegionView?
 
     private let loader = ImageLoader()
     private var source: CGImage?

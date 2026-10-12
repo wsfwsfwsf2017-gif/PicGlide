@@ -16,13 +16,13 @@ enum PicGlideApp {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
     let model = ViewerModel()
-    private(set) var window: NSWindow!
+    private(set) var window: PicGlideWindow!
     private var allowClose = false
     private var allowTermination = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 760),
+        window = PicGlideWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false)
         window.title = "PicGlide"; window.titleVisibility = .hidden
@@ -31,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.minSize = NSSize(width: 620, height: 440)
         window.collectionBehavior = [.fullScreenPrimary]
         window.delegate = self
+        window.model = model
         window.contentView = NSHostingView(rootView: ViewerView(model: model))
         window.center(); window.setFrameAutosaveName("PicGlideWindow")
         model.window = window
@@ -78,6 +79,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     func windowDidResignKey(_ notification: Notification) {
         model.cancelGestureID = UUID()
+    }
+
+    func windowWillUseStandardFrame(_ window: NSWindow, defaultFrame newFrame: NSRect) -> NSRect {
+        window.screen?.visibleFrame ?? newFrame
     }
 
     private func buildMenu() {
@@ -151,8 +156,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc func closeWindow() { window.performClose(nil) }
     @objc func about() {
         NSApp.orderFrontStandardAboutPanel(options: [
-            .applicationName: "PicGlide", .applicationVersion: "1.0.0",
+            .applicationName: "PicGlide",
+            .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.1",
             .credits: NSAttributedString(string: "轻量看图，随手标注。\nWebP 编码：libwebp（BSD-3-Clause）")
         ])
+    }
+}
+
+@MainActor
+final class PicGlideWindow: NSWindow {
+    weak var model: ViewerModel?
+
+    func isHeaderLocation(_ point: NSPoint) -> Bool {
+        guard let contentView else { return false }
+        let content = contentView.convert(contentView.bounds, to: nil)
+        let header = NSRect(x: content.minX, y: content.maxY - 40, width: content.width, height: 40)
+        guard header.contains(point) else { return false }
+        for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            if let button = standardWindowButton(type), !button.isHidden,
+               button.convert(button.bounds, to: nil).insetBy(dx: -3, dy: -3).contains(point) { return false }
+        }
+        return true
+    }
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown, isHeaderLocation(event.locationInWindow) {
+            if event.clickCount.isMultiple(of: 2) {
+                if !styleMask.contains(.fullScreen) { zoom(nil) }
+                return
+            }
+            if !styleMask.contains(.fullScreen) {
+                performDrag(with: event)
+                return
+            }
+        }
+        super.sendEvent(event)
+        switch event.type {
+        case .mouseMoved, .leftMouseUp:
+            updateCursor(at: event.locationInWindow)
+        case .cursorUpdate, .mouseEntered, .mouseExited:
+            updateCursor(at: mouseLocationOutsideOfEventStream)
+        case .leftMouseDragged:
+            if model?.canvas?.canvasCursor === NSCursor.closedHand { NSCursor.closedHand.set() }
+        default: break
+        }
+    }
+
+    private func updateCursor(at point: NSPoint) {
+        guard isKeyWindow, let canvas = model?.canvas else { return }
+        if let toolbar = model?.toolbarCursorRegion,
+           toolbar.convert(toolbar.cursorRect, to: nil).contains(point), let contentView {
+            // SwiftUI hosting views can replace cursor rects registered by their transparent backgrounds.
+            (CursorRegionView.cursor(at: point, in: contentView) ?? .arrow).set()
+        } else if canvas.convert(canvas.visibleRect.intersection(canvas.bounds), to: nil).contains(point) {
+            canvas.canvasCursor.set()
+        }
     }
 }
