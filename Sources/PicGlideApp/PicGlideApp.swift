@@ -183,6 +183,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 final class PicGlideWindow: NSWindow {
     weak var model: ViewerModel?
     private var restoreFrame: NSRect?
+    private weak var tooltipRegion: CursorRegionView?
+    private var tooltipTask: Task<Void, Never>?
+    private(set) var tooltipPanel: TooltipPanel?
+
+    func hideTooltip() {
+        tooltipTask?.cancel(); tooltipTask = nil; tooltipRegion = nil
+        tooltipPanel?.orderOut(nil)
+    }
+
+    func refreshTooltip() {
+        if tooltipRegion != nil { updateTooltip(at: mouseLocationOutsideOfEventStream) }
+    }
+
+    private func updateTooltip(at point: NSPoint) {
+        guard isKeyWindow, NSApp.modalWindow == nil, model?.isDrawing != true,
+              let contentView, let region = CursorRegionView.region(at: point, in: contentView),
+              !region.tooltipText.isEmpty else { hideTooltip(); return }
+        if tooltipRegion === region {
+            if tooltipPanel?.isVisible == true { tooltipPanel?.show(for: region) }
+            return
+        }
+        hideTooltip(); tooltipRegion = region
+        tooltipTask = Task { [weak self, weak region] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, let self, let region, isKeyWindow, NSApp.modalWindow == nil,
+                  tooltipRegion === region, region.window === self,
+                  region.convert(region.cursorRect, to: nil).contains(mouseLocationOutsideOfEventStream) else { return }
+            let panel = tooltipPanel ?? TooltipPanel()
+            tooltipPanel = panel; panel.show(for: region)
+        }
+    }
+
+    override func resignKey() { hideTooltip(); super.resignKey() }
+    override func orderOut(_ sender: Any?) { hideTooltip(); super.orderOut(sender) }
+    override func close() { hideTooltip(); super.close() }
 
     func fillScreen() {
         guard !styleMask.contains(.fullScreen), let screen else { return }
@@ -217,6 +252,11 @@ final class PicGlideWindow: NSWindow {
     }
 
     override func sendEvent(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown, .leftMouseDragged, .scrollWheel, .keyDown:
+            hideTooltip()
+        default: break
+        }
         if event.type == .leftMouseDown, isHeaderLocation(event.locationInWindow) {
             if event.clickCount.isMultiple(of: 2) {
                 toggleScreenFill()
@@ -233,10 +273,12 @@ final class PicGlideWindow: NSWindow {
             model?.canvas?.trackPointer(at: event.locationInWindow)
             model?.canvas?.updateNavigationHover(at: event.locationInWindow)
             updateCursor(at: event.locationInWindow)
+            if event.type == .mouseMoved { updateTooltip(at: event.locationInWindow) }
         case .cursorUpdate, .mouseEntered, .mouseExited:
             model?.canvas?.trackPointer(at: mouseLocationOutsideOfEventStream)
             model?.canvas?.updateNavigationHover(at: mouseLocationOutsideOfEventStream)
             updateCursor(at: mouseLocationOutsideOfEventStream)
+            updateTooltip(at: mouseLocationOutsideOfEventStream)
         case .leftMouseDragged:
             if model?.canvas?.canvasCursor === NSCursor.closedHand { NSCursor.closedHand.set() }
         default: break
@@ -245,9 +287,6 @@ final class PicGlideWindow: NSWindow {
 
     private func updateCursor(at point: NSPoint) {
         guard isKeyWindow, let canvas = model?.canvas else { return }
-        if let contentView {
-            for region in CursorRegionView.regions(in: contentView) { region.refreshTooltip() }
-        }
         if let contentView, let cursor = CursorRegionView.cursor(at: point, in: contentView) {
             // SwiftUI hosting views can replace cursor rects registered by their transparent backgrounds.
             cursor.set()

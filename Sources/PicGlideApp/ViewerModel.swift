@@ -24,6 +24,8 @@ final class ViewerModel {
     var imageID = UUID()
     var files: [URL] = []
     var history = EditHistory()
+    private(set) var editRevision = 0
+    private(set) var frameRevision = 0
     var isLoading = false
     var isSaving = false
     var isPreparingEdit = false
@@ -67,6 +69,11 @@ final class ViewerModel {
     var canRedo: Bool { history.canRedo && !isBusy }
     var canSave: Bool { isDirty && !isBusy && !isDrawing && pendingCrop == nil }
     var canSaveCopy: Bool { frame != nil && !isBusy && !isDrawing && pendingCrop == nil }
+    var canRestore: Bool { isEditing && !isBusy && (isDirty || pendingCrop != nil || isDrawing) }
+    var restoreHelp: String {
+        if isBusy { return "请等待当前操作结束，再恢复" }
+        return canRestore ? "恢复到最近一次保存，放弃未保存修改" : "没有需要恢复的修改"
+    }
     var saveHelp: String {
         if isBusy { return "请等待当前操作结束" }
         if pendingCrop != nil { return "先应用或取消裁剪，再保存（⌘S）" }
@@ -124,6 +131,7 @@ final class ViewerModel {
         let token = generation
         currentURL = url; frame = nil; metadata = nil; source = nil
         fingerprint = nil; history = EditHistory(); pendingCrop = nil
+        editRevision = 0; frameRevision = 0
         isEditing = false; tool = .hand; isLoading = true; loadingError = nil
         requestedDimension = 2048
         revealControls()
@@ -185,15 +193,18 @@ final class ViewerModel {
         tool = next; pendingCrop = nil; cancelGestureID = UUID(); revealControls()
     }
 
-    func commit(_ operation: EditOperation) {
-        guard isEditing, source != nil, !isBusy else { return }
+    @discardableResult
+    func commit(_ operation: EditOperation) -> Int? {
+        guard isEditing, source != nil, !isBusy else { return nil }
         history.append(operation); pendingCrop = nil
+        editRevision += 1
         if case .crop = operation, let frame,
            let cropped = try? ImageRenderer.render(source: frame.image, originalBounds: frame.bounds, operations: [operation]) {
             self.frame = cropped
         }
         window?.isDocumentEdited = isDirty
         renderPreview(dimension: requestedDimension)
+        return editRevision
     }
 
     func applyCrop() {
@@ -207,13 +218,29 @@ final class ViewerModel {
     func undo() {
         guard canUndo else { return }
         cancelGestureID = UUID(); pendingCrop = nil; history.undo()
+        editRevision += 1
         window?.isDocumentEdited = isDirty; renderPreview(dimension: requestedDimension)
     }
 
     func redo() {
         guard canRedo else { return }
         cancelGestureID = UUID(); pendingCrop = nil; history.redo()
+        editRevision += 1
         window?.isDocumentEdited = isDirty; renderPreview(dimension: requestedDimension)
+    }
+
+    func restoreEdits() {
+        guard canRestore else { return }
+        let alert = NSAlert()
+        alert.messageText = "放弃未保存的修改？"
+        alert.informativeText = "图片将恢复到最近一次保存的状态。已保存的内容会保留，放弃的修改无法撤销。"
+        alert.addButton(withTitle: "取消").keyEquivalent = "\r"
+        alert.addButton(withTitle: "恢复").hasDestructiveAction = true
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        history.restoreSaved(); editRevision += 1
+        chooseTool(.hand)
+        window?.isDocumentEdited = false
+        renderPreview(dimension: requestedDimension)
     }
 
     func setZoom(actualSize: Bool) {
@@ -240,7 +267,7 @@ final class ViewerModel {
     private func renderPreview(dimension: Int) {
         guard let metadata, let url = currentURL else { return }
         renderTask?.cancel()
-        let base = source, operations = history.operations, token = generation
+        let base = source, operations = history.operations, token = generation, revision = editRevision
         let task = Task.detached(priority: .userInitiated) {
             try Task.checkCancellation()
             let image = try base ?? ImageCodec.decode(url, maxDimension: dimension)
@@ -251,8 +278,8 @@ final class ViewerModel {
         Task { [weak self] in
             do {
                 let rendered = try await task.value
-                guard let self, generation == token, !task.isCancelled else { return }
-                frame = rendered
+                guard let self, generation == token, editRevision == revision, !task.isCancelled else { return }
+                frame = rendered; frameRevision = revision
             } catch is CancellationError {} catch {
                 guard let self, generation == token, !task.isCancelled else { return }
                 showError(error)
@@ -260,14 +287,14 @@ final class ViewerModel {
         }
     }
 
-    func makeMosaicPreview(blockSize: Double) async throws -> CGImage {
+    func makeMosaicPreview(blockSize: Double) async throws -> RenderedImage {
         guard let source, let metadata else { throw PicGlideError.invalidImage }
         let operations = history.operations
         let task = Task.detached(priority: .userInitiated) {
             let frame = try ImageRenderer.render(source: source, originalBounds: metadata.bounds,
                                                  operations: operations, maxDimension: 2048)
             try Task.checkCancellation()
-            return try ImageRenderer.mosaicImage(frame, blockSize: blockSize)
+            return try RenderedImage(image: ImageRenderer.mosaicImage(frame, blockSize: blockSize), bounds: frame.bounds)
         }
         return try await withTaskCancellationHandler {
             try await task.value

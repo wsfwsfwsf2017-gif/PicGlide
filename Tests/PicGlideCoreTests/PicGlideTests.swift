@@ -96,6 +96,34 @@ private func temporaryDirectory() throws -> URL {
     #expect(croppedBytes[0] == 20 && croppedBytes[1] == 10)
 }
 
+@Test func restoreSavedPreservesCheckpointAndDropsUnsavedBranches() throws {
+    var history = EditHistory()
+    let mosaic = EditOperation.mosaic([CGPoint(x: 40, y: 40)], diameter: 20, blockSize: 8)
+    history.append(mosaic)
+    history.restoreSaved()
+    #expect(history.operations.isEmpty && !history.isDirty && !history.canUndo && !history.canRedo)
+
+    let crop = EditOperation.crop(CGRect(x: 10, y: 10, width: 60, height: 50))
+    history.append(crop); history.append(mosaic); history.markSaved()
+    let saved = history.operations
+    let red = Ink(red: 1, green: 0, blue: 0)
+    history.append(.rectangle(CGRect(x: 20, y: 20, width: 20, height: 20), ink: red, width: 2))
+    history.append(.pencil([CGPoint(x: 20, y: 30), CGPoint(x: 50, y: 30)], ink: red, width: 3))
+    history.undo()
+    history.restoreSaved()
+    #expect(history.operations == saved && !history.isDirty && !history.canRedo)
+
+    history.undo(); history.undo()
+    history.append(.pencil([CGPoint(x: 20, y: 30)], ink: red, width: 3))
+    history.restoreSaved()
+    #expect(history.operations == saved && !history.isDirty && !history.canRedo)
+    let original = try image(), bounds = CGRect(x: 0, y: 0, width: 100, height: 80)
+    let restored = try ImageRenderer.render(source: original, originalBounds: bounds, operations: history.operations)
+    let checkpoint = try ImageRenderer.render(source: original, originalBounds: bounds, operations: saved)
+    #expect(restored.bounds == checkpoint.bounds)
+    #expect(try pixels(restored.image) == pixels(checkpoint.image))
+}
+
 @Test func mosaicStaysInsideCircleAndUndoes() throws {
     let source = try image()
     let bounds = CGRect(x: 0, y: 0, width: 100, height: 80)

@@ -26,7 +26,9 @@ final class CanvasView: NSView {
     private var cropAdjustment: CropAdjustment?
     private var cropStart: CGRect?
     private(set) var cropControls: NSHostingView<CropControls>?
-    private(set) var mosaicPreview: CGImage?
+    var mosaicPreview: CGImage? { mosaicFrame?.image }
+    private var mosaicFrame: RenderedImage?
+    private var completedMosaics: [(revision: Int, operations: [EditOperation], preview: RenderedImage)] = []
     private var mosaicTask: Task<Void, Never>?
     private var mosaicID = UUID()
     private var strokeDiameter: Double = 80
@@ -60,6 +62,7 @@ final class CanvasView: NSView {
         if imageID != model.imageID {
             imageID = model.imageID; fitMode = true
             viewport.pan = .zero; clearGesture()
+            completedMosaics.removeAll()
         }
         if cancelID != model.cancelGestureID {
             cancelID = model.cancelGestureID; clearGesture(); spaceHeld = false
@@ -184,7 +187,10 @@ final class CanvasView: NSView {
             context.setFillColor(NSColor.white.withAlphaComponent(0.06).cgColor)
             context.fill(rect)
         }
-        let paintingMosaic = model.tool == .mosaic && !stroke.isEmpty && mosaicPreview != nil
+        completedMosaics.removeAll {
+            $0.revision <= model.frameRevision || !model.history.operations.starts(with: $0.operations)
+        }
+        let paintingMosaic = !completedMosaics.isEmpty || (model.tool == .mosaic && !stroke.isEmpty && mosaicFrame != nil)
         if paintingMosaic { context.beginTransparencyLayer(auxiliaryInfo: nil) }
         context.saveGState()
         context.translateBy(x: rect.minX, y: rect.maxY)
@@ -192,16 +198,13 @@ final class CanvasView: NSView {
         context.draw(frame.image, in: CGRect(origin: .zero, size: rect.size))
         context.restoreGState()
 
-        if model.tool == .mosaic, !stroke.isEmpty, let mosaicPreview {
-            let origin = viewport.viewPoint(from: .zero)
-            var transform = CGAffineTransform(a: viewport.scale, b: 0, c: 0, d: viewport.scale,
-                                              tx: origin.x, ty: origin.y)
-            context.saveGState(); context.clip(to: rect)
-            context.addPath(ImageRenderer.mosaicPath(stroke, diameter: strokeDiameter).copy(using: &transform)!)
-            context.clip(); context.setBlendMode(.copy)
-            context.translateBy(x: rect.minX, y: rect.maxY); context.scaleBy(x: 1, y: -1)
-            context.draw(mosaicPreview, in: CGRect(origin: .zero, size: rect.size))
-            context.restoreGState()
+        for completed in completedMosaics {
+            if let operation = completed.operations.last {
+                drawMosaic(operation, preview: completed.preview, in: context)
+            }
+        }
+        if model.tool == .mosaic, !stroke.isEmpty, let mosaicFrame {
+            drawMosaic(.mosaic(stroke, diameter: strokeDiameter, blockSize: strokeBlockSize), preview: mosaicFrame, in: context)
         }
         if paintingMosaic { context.endTransparencyLayer() }
         context.restoreGState()
@@ -254,6 +257,20 @@ final class CanvasView: NSView {
             context.setStrokeColor(NSColor.white.cgColor); context.setLineWidth(1)
             context.strokeEllipse(in: ring); context.restoreGState()
         }
+    }
+
+    private func drawMosaic(_ operation: EditOperation, preview: RenderedImage, in context: CGContext) {
+        guard case let .mosaic(points, diameter, _) = operation else { return }
+        let origin = viewport.viewPoint(from: .zero)
+        var transform = CGAffineTransform(a: viewport.scale, b: 0, c: 0, d: viewport.scale, tx: origin.x, ty: origin.y)
+        let previewRect = CGRect(origin: viewport.viewPoint(from: preview.bounds.origin),
+            size: CGSize(width: preview.bounds.width * viewport.scale, height: preview.bounds.height * viewport.scale))
+        context.saveGState(); context.clip(to: viewport.imageRect)
+        context.addPath(ImageRenderer.mosaicPath(points, diameter: diameter).copy(using: &transform)!)
+        context.clip(); context.setBlendMode(.copy)
+        context.translateBy(x: previewRect.minX, y: previewRect.maxY); context.scaleBy(x: 1, y: -1)
+        context.draw(preview.image, in: CGRect(origin: .zero, size: previewRect.size))
+        context.restoreGState()
     }
 
     override func mouseMoved(with event: NSEvent) { trackPointer(at: event.locationInWindow); model.revealControls() }
@@ -312,7 +329,7 @@ final class CanvasView: NSView {
             do {
                 let image = try await model.makeMosaicPreview(blockSize: blockSize)
                 guard !Task.isCancelled, let self, mosaicID == token else { return }
-                mosaicPreview = image; needsDisplay = true
+                mosaicFrame = image; needsDisplay = true
             } catch is CancellationError {} catch {
                 guard !Task.isCancelled, let self, mosaicID == token else { return }
                 clearGesture(); model.showError(error)
@@ -391,7 +408,11 @@ final class CanvasView: NSView {
             case .mosaic:
                 let last = viewport.imagePoint(from: convert(event.locationInWindow, from: nil))
                 if stroke.last != last { stroke.append(last) }
-                if !stroke.isEmpty { model.commit(.mosaic(stroke, diameter: strokeDiameter, blockSize: strokeBlockSize)) }
+                if !stroke.isEmpty, let revision = model.commit(.mosaic(stroke, diameter: strokeDiameter, blockSize: strokeBlockSize)),
+                   let mosaicFrame {
+                    // Keep the displayed stroke until the matching committed frame replaces it.
+                    completedMosaics.append((revision, model.history.operations, mosaicFrame))
+                }
             case .rectangle:
                 if let selection, selection.width >= 1, selection.height >= 1 {
                     model.commit(.rectangle(selection, ink: model.ink, width: model.lineWidth))
@@ -446,7 +467,7 @@ final class CanvasView: NSView {
     private func clearGesture() {
         dragStart = nil; selection = nil; stroke.removeAll(); isPanning = false
         cropAdjustment = nil; cropStart = nil; model.isDrawing = false
-        mosaicTask?.cancel(); mosaicTask = nil; mosaicID = UUID(); mosaicPreview = nil
+        mosaicTask?.cancel(); mosaicTask = nil; mosaicID = UUID(); mosaicFrame = nil
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {

@@ -45,6 +45,10 @@ public struct EditHistory: Sendable {
     public mutating func undo() { if canUndo { position -= 1 } }
     public mutating func redo() { if canRedo { position += 1 } }
     public mutating func markSaved() { saved = operations }
+    public mutating func restoreSaved() {
+        entries = saved
+        position = entries.count
+    }
 
     public func bounds(in original: CGRect) -> CGRect {
         operations.reduce(original) { bounds, operation in

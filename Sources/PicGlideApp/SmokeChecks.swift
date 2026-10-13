@@ -36,6 +36,12 @@ func runSmokeChecks(delegate: AppDelegate) async {
         guard let data = bitmap.representation(using: .png, properties: [:]) else { return }
         try data.write(to: output.appendingPathComponent(name + ".png"))
     }
+    func canvasPatch(_ point: CGPoint, canvas: CanvasView) -> Data {
+        let rect = CGRect(x: point.x - 6, y: point.y - 6, width: 12, height: 12)
+        let bitmap = canvas.bitmapImageRepForCachingDisplay(in: rect)!
+        canvas.cacheDisplay(in: rect, to: bitmap)
+        return Data(bytes: bitmap.bitmapData!, count: bitmap.bytesPerRow * bitmap.pixelsHigh)
+    }
     func findCanvas(_ view: NSView) -> CanvasView? {
         if let canvas = view as? CanvasView { return canvas }
         return view.subviews.compactMap(findCanvas).first
@@ -181,17 +187,27 @@ func runSmokeChecks(delegate: AppDelegate) async {
         checks.append(label)
     }
     func checkTooltip(_ region: CursorRegionView, name: String) async throws {
-        guard !region.helpText.isEmpty else { fatalError("Missing native tooltip: \(name)") }
+        guard !region.helpText.isEmpty else { fatalError("Missing tooltip: \(name)") }
         try await hover(delegate.model.canvas!)
-        try await wait { !NSApp.windows.contains { $0.isVisible && String(describing: type(of: $0)).contains("ToolTip") } }
+        try await wait { delegate.window.tooltipPanel?.isVisible != true }
+        let responder = delegate.window.firstResponder, started = Date()
         try await hover(region)
-        try await wait { NSApp.windows.contains { $0.isVisible && String(describing: type(of: $0)).contains("ToolTip") } }
-        let tooltip = NSApp.windows.first { $0.isVisible && String(describing: type(of: $0)).contains("ToolTip") }!
+        guard delegate.window.tooltipPanel?.isVisible != true else { fatalError("Tooltip appears before 300ms") }
+        mouse(.mouseMoved, at: region.convert(NSPoint(x: region.bounds.midX + 1, y: region.bounds.midY), to: nil))
+        try await wait { delegate.window.tooltipPanel?.isVisible == true }
+        let tooltip = delegate.window.tooltipPanel!, elapsed = Date().timeIntervalSince(started)
+        guard elapsed >= 0.3 && elapsed < 0.65, tooltip.text == region.tooltipText,
+              tooltip.ignoresMouseEvents, !tooltip.isKeyWindow,
+              delegate.window.firstResponder === responder else { fatalError("Tooltip delay, text, or focus is incorrect") }
+        let label = nativeControls(in: tooltip.contentView!).compactMap { $0 as? NSTextField }.first!
+        guard label.stringValue == region.tooltipText, label.fittingSize.width <= label.bounds.width,
+              label.fittingSize.height <= label.bounds.height else { fatalError("Tooltip text or shortcut is clipped") }
+        measurements[name + "Seconds"] = elapsed
         if let view = tooltip.contentView, let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
             view.cacheDisplay(in: view.bounds, to: bitmap)
             try bitmap.representation(using: .png, properties: [:])?.write(to: output.appendingPathComponent(name + ".png"))
         }
-        checks.append("Native tooltip appears: \(name)")
+        checks.append("300ms tooltip, movement within button preserves delay and keyboard focus: \(name)")
     }
     func respondToAlert(_ title: String) {
         let timer = Timer(timeInterval: 0.2, repeats: false) { _ in
@@ -525,8 +541,28 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try await wait { !model.isDrawing && model.history.operations.count == beforeBrush + 1 }
         try await Task.sleep(for: .milliseconds(300))
         let dot = canvas.viewport.viewPoint(from: CGPoint(x: 800, y: 500))
-        gesture(.leftMouseDown, dot, canvas: canvas); gesture(.leftMouseUp, dot, canvas: canvas)
+        gesture(.leftMouseDown, dot, canvas: canvas)
+        try await wait { canvas.mosaicPreview != nil }
+        let liveDot = canvasPatch(dot, canvas: canvas)
+        try capture("mosaic-before-release")
+        gesture(.leftMouseUp, dot, canvas: canvas)
+        try capture("mosaic-after-release")
+        guard canvasPatch(dot, canvas: canvas) == liveDot else {
+            throw NSError(domain: "PicGlideSmoke", code: 8,
+                userInfo: [NSLocalizedDescriptionKey: "Mosaic disappears on mouse-up before committed preview arrives"])
+        }
+        checks.append("Mosaic pixels remain visible between mouse-up and committed rendering")
+        model.chooseTool(.hand); canvas.update()
+        guard canvasPatch(dot, canvas: canvas) == liveDot else { fatalError("Tool switch clears committed mosaic preview") }
+        model.chooseTool(.mosaic); canvas.update()
         guard case let .mosaic(points, _, _) = model.history.operations.last, points.count == 1 else { fatalError("Mosaic click is not a circle") }
+        let nextDot = canvas.viewport.viewPoint(from: CGPoint(x: 750, y: 560))
+        gesture(.leftMouseDown, nextDot, canvas: canvas); gesture(.leftMouseUp, nextDot, canvas: canvas)
+        guard canvasPatch(dot, canvas: canvas) == liveDot else { fatalError("A fast second stroke removes the first") }
+        try await wait { model.frameRevision == model.editRevision }
+        try capture("mosaic-committed")
+        checks.append("Fast consecutive mosaic strokes and tool switching preserve completed previews")
+        model.undo(); try await wait { model.frameRevision == model.editRevision }
         model.undo(); try await Task.sleep(for: .milliseconds(100))
         let beforeCancel = model.history.operations
         let savedBeforeCancel = try Data(contentsOf: fixture)
@@ -669,6 +705,29 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try await wait { !model.isSaving && !model.isDirty }
         guard try ImageMetadata.read(fixture).pixelSize == CGSize(width: 1450, height: 950) else { fatalError("Save mismatch") }
         checks.append("UI overwrite save and pixel dimensions")
+        let savedOperations = model.history.operations, savedFile = try Data(contentsOf: fixture)
+        let savedBounds = model.frame!.bounds, savedScale = canvas.viewport.scale
+        let savedPosition = canvas.viewport.viewPoint(from: savedBounds.origin)
+        guard !model.canRestore else { fatalError("Restore enabled without unsaved changes") }
+        model.commit(.rectangle(CGRect(x: 300, y: 300, width: 100, height: 100), ink: model.ink, width: 3))
+        try await wait { model.frameRevision == model.editRevision }
+        model.chooseTool(.crop); canvas.update()
+        drag(canvas.viewport.viewPoint(from: CGPoint(x: 300, y: 250)),
+             canvas.viewport.viewPoint(from: CGPoint(x: 900, y: 700)), canvas: canvas)
+        let restoreOperations = model.history.operations, restoreCrop = model.pendingCrop
+        respondToAlert("取消"); model.restoreEdits()
+        guard model.history.operations == restoreOperations && model.pendingCrop == restoreCrop else {
+            fatalError("Cancel restore loses edits or crop selection")
+        }
+        respondToAlert("恢复"); model.restoreEdits()
+        try await wait { model.frameRevision == model.editRevision }
+        canvas.update()
+        guard model.history.operations == savedOperations, !model.isDirty, !model.canRestore, !model.history.canRedo,
+              model.pendingCrop == nil, model.tool == .hand, model.isEditing,
+              canvas.viewport.scale == savedScale, canvas.viewport.viewPoint(from: savedBounds.origin) == savedPosition,
+              try Data(contentsOf: fixture) == savedFile else { fatalError("Restore does not preserve saved edits, viewport, or file") }
+        try capture("editor-restored")
+        checks.append("Restore confirmation cancel preserves edits; confirm restores saved checkpoint without saving or leaving editing")
         model.commit(.rectangle(CGRect(x: 300, y: 300, width: 100, height: 100), ink: model.ink, width: 3))
         respondToAlert("放弃")
         model.navigate(1)

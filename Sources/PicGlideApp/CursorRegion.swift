@@ -59,15 +59,15 @@ struct CursorRegion: NSViewRepresentable {
 }
 
 @MainActor
-final class CursorRegionView: NSView, NSViewToolTipOwner {
+final class CursorRegionView: NSView {
     var cursor: NSCursor = .arrow
     var helpText = ""
     var cursorRect: NSRect { visibleRect.intersection(bounds) }
     private weak var model: ViewerModel?
-    private weak var tooltipHost: NSView?
-    private var tooltipTag: NSView.ToolTipTag?
-    private var tooltipRect = NSRect.zero
-    private var tooltipText = ""
+    var tooltipText: String {
+        !helpText.isEmpty && (window as? PicGlideWindow)?.model?.isBusy == true
+            ? "\(helpText)\n图片正在处理，请稍候。" : helpText
+    }
 
     init(model: ViewerModel?) {
         self.model = model
@@ -78,10 +78,7 @@ final class CursorRegionView: NSView, NSViewToolTipOwner {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override func resetCursorRects() { addCursorRect(cursorRect, cursor: cursor) }
     override func viewWillMove(toWindow newWindow: NSWindow?) {
-        if newWindow !== window, let tooltipTag {
-            tooltipHost?.removeToolTip(tooltipTag)
-            self.tooltipTag = nil; tooltipHost = nil; tooltipText = ""; tooltipRect = .zero
-        }
+        if newWindow !== window { (window as? PicGlideWindow)?.hideTooltip() }
         super.viewWillMove(toWindow: newWindow)
     }
     override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); refreshCursorRects() }
@@ -90,7 +87,7 @@ final class CursorRegionView: NSView, NSViewToolTipOwner {
 
     func refreshCursorRects() {
         window?.invalidateCursorRects(for: self)
-        refreshTooltip()
+        (window as? PicGlideWindow)?.refreshTooltip()
         guard let model else { return }
         if window != nil { model.toolbarCursorRegion = self }
         else if model.toolbarCursorRegion === self { model.toolbarCursorRegion = nil }
@@ -100,30 +97,56 @@ final class CursorRegionView: NSView, NSViewToolTipOwner {
         }
     }
 
-    func refreshTooltip() {
-        let host = window?.contentView
-        let rect = host.map { convert(cursorRect, to: $0).intersection($0.visibleRect) } ?? .zero
-        let text = !helpText.isEmpty && (window as? PicGlideWindow)?.model?.isBusy == true
-            ? "\(helpText)\n图片正在处理，请稍候。" : helpText
-        guard host !== tooltipHost || !rect.equalTo(tooltipRect) || text != tooltipText else { return }
-        if let tooltipTag { tooltipHost?.removeToolTip(tooltipTag) }
-        tooltipTag = nil; tooltipHost = host; tooltipRect = rect; tooltipText = text
-        if let host, !rect.isEmpty, !text.isEmpty {
-            // The transparent cursor view is excluded from hit testing; register help on its hosting view.
-            tooltipTag = host.addToolTip(rect, owner: self, userData: nil)
-        }
-    }
-
-    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag,
-              point: NSPoint, userData: UnsafeMutableRawPointer?) -> String { tooltipText }
-
     static func regions(in view: NSView) -> [CursorRegionView] {
         guard !view.isHidden else { return [] }
         return ((view as? CursorRegionView).map { [$0] } ?? []) + view.subviews.flatMap { regions(in: $0) }
     }
 
-    static func cursor(at point: NSPoint, in root: NSView) -> NSCursor? {
+    static func region(at point: NSPoint, in root: NSView) -> CursorRegionView? {
         regions(in: root).filter { $0.convert($0.cursorRect, to: nil).contains(point) }
-            .min { $0.cursorRect.width * $0.cursorRect.height < $1.cursorRect.width * $1.cursorRect.height }?.cursor
+            .min { $0.cursorRect.width * $0.cursorRect.height < $1.cursorRect.width * $1.cursorRect.height }
+    }
+
+    static func cursor(at point: NSPoint, in root: NSView) -> NSCursor? { region(at: point, in: root)?.cursor }
+}
+
+@MainActor
+final class TooltipPanel: NSPanel {
+    private(set) var text = ""
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
+    init() {
+        super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        isOpaque = false; backgroundColor = .clear; hasShadow = true
+        ignoresMouseEvents = true; hidesOnDeactivate = true; isReleasedWhenClosed = false
+        collectionBehavior = [.fullScreenAuxiliary, .ignoresCycle, .transient]
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func show(for region: CursorRegionView) {
+        guard let owner = region.window, !region.cursorRect.isEmpty else { return }
+        text = region.tooltipText
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.font = .systemFont(ofSize: 11); label.textColor = .labelColor
+        label.preferredMaxLayoutWidth = 280
+        let fitted = label.fittingSize
+        let size = NSSize(width: ceil(fitted.width) + 16, height: ceil(fitted.height) + 12)
+        let background = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        background.material = .popover; background.state = .active; background.wantsLayer = true
+        background.layer?.cornerRadius = 6; background.layer?.masksToBounds = true
+        label.frame = NSRect(x: 8, y: 6, width: size.width - 16, height: size.height - 12)
+        background.addSubview(label); contentView = background; appearance = owner.effectiveAppearance
+        let anchor = owner.convertToScreen(region.convert(region.cursorRect, to: nil))
+        let area = (owner.screen ?? NSScreen.main)?.visibleFrame ?? owner.frame
+        let y = anchor.maxY + 6 + size.height <= area.maxY ? anchor.maxY + 6 : anchor.minY - size.height - 6
+        let origin = NSPoint(x: min(max(area.minX, anchor.midX - size.width / 2), area.maxX - size.width),
+                             y: min(max(area.minY, y), area.maxY - size.height))
+        setFrame(NSRect(origin: origin, size: size), display: true)
+        if parent !== owner {
+            parent?.removeChildWindow(self)
+            owner.addChildWindow(self, ordered: .above)
+        }
+        orderFront(nil)
     }
 }

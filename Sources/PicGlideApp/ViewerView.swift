@@ -136,6 +136,12 @@ struct ViewerView: View {
                 }
                 zoomMenu
                 Spacer(minLength: 4)
+                if model.isEditing {
+                    Button(action: model.restoreEdits) {
+                        Text("恢复").font(.system(size: 12, weight: .medium)).frame(width: 48, height: 32)
+                    }
+                    .buttonStyle(ClickableButtonStyle(help: model.restoreHelp)).disabled(!model.canRestore)
+                }
                 Button(action: model.toggleEditing) {
                     Text(model.isEditing ? "返回浏览" : "编辑")
                         .font(.system(size: 12, weight: .medium)).lineLimit(1)
@@ -165,7 +171,7 @@ struct ViewerView: View {
                 toolOptions.frame(height: 32).padding(.horizontal, 14).padding(.vertical, 6)
             }
         }
-        .frame(width: model.isEditing ? 548 : 472)
+        .frame(width: model.isEditing ? 580 : 472)
         .background(CursorRegion(cursor: .arrow, model: model))
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.1 : 0.4)))
