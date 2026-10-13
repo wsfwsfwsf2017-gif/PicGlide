@@ -28,10 +28,85 @@ private func pixels(_ image: CGImage) throws -> [UInt8] {
                                      count: image.width * image.height * 4))
 }
 
+private func mosaic(_ points: [CGPoint], diameter: Double, blockSize: Double,
+                    source: CGImage? = nil, bounds: CGRect? = nil) throws -> EditOperation {
+    let source = try source ?? image()
+    let frame = RenderedImage(image: source, bounds: bounds ?? CGRect(x: 0, y: 0, width: source.width, height: source.height))
+    let colors = try RenderedImage(image: ImageRenderer.mosaicImage(frame, blockSize: blockSize), bounds: frame.bounds)
+    let patch = try ImageRenderer.mosaicPatch(from: colors, points: points, diameter: diameter)
+    return .mosaic(points, diameter: diameter, blockSize: blockSize, patch: patch)
+}
+
 private func temporaryDirectory() throws -> URL {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent("picglide-tests-\(UUID())")
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
+}
+
+private func highContrastImage(width: Int = 4096, height: Int = 3072, alpha: UInt8 = 255) throws -> CGImage {
+    var bytes = [UInt8](repeating: 0, count: width * height * 4)
+    for y in 0..<height {
+        for x in 0..<width {
+            let offset = (y * width + x) * 4
+            let value = UInt8((x % 24 == 12 || y % 24 == 12) ? 8 : 240)
+            let premultiplied = UInt8(Int(value) * Int(alpha) / 255)
+            bytes[offset] = premultiplied; bytes[offset + 1] = premultiplied
+            bytes[offset + 2] = premultiplied; bytes[offset + 3] = alpha
+        }
+    }
+    let provider = try #require(CGDataProvider(data: Data(bytes) as CFData))
+    return try #require(CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+        bytesPerRow: width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+        bitmapInfo: CGBitmapInfo(rawValue: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue),
+        provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent))
+}
+
+@Test func highContrastMosaicKeepsPreviewColorsOnCommit() throws {
+    let source = try highContrastImage(), bounds = CGRect(x: 0, y: 0, width: 4096, height: 3072)
+    let preview = try ImageRenderer.render(source: source, originalBounds: bounds, operations: [], maxDimension: 2048)
+    let live = try ImageRenderer.mosaicImage(preview, blockSize: 24)
+    let points = [CGPoint(x: 1200, y: 1400), CGPoint(x: 2000, y: 1400)]
+    let patch = try ImageRenderer.mosaicPatch(from: RenderedImage(image: live, bounds: bounds), points: points, diameter: 80)
+    let stroke = EditOperation.mosaic(points, diameter: 80, blockSize: 24, patch: patch)
+    let committed = try ImageRenderer.render(source: source, originalBounds: bounds, operations: [stroke])
+    let before = try pixels(live), after = try pixels(committed.image)
+    let a = (700 * 2048 + 750) * 4, b = (1400 * 4096 + 1500) * 4
+    print("High-contrast mosaic before/after:", Array(before[a..<a+4]), Array(after[b..<b+4]))
+    for channel in 0..<4 { #expect(abs(Int(before[a + channel]) - Int(after[b + channel])) <= 2) }
+}
+
+@Test func frozenMosaicPatchKeepsAlphaColorsAndCropCoordinatesThroughExport() throws {
+    let source = try highContrastImage(alpha: 128), bounds = CGRect(x: 0, y: 0, width: 4096, height: 3072)
+    let preview = try ImageRenderer.render(source: source, originalBounds: bounds, operations: [], maxDimension: 2048)
+    let colors = try RenderedImage(image: ImageRenderer.mosaicImage(preview, blockSize: 24), bounds: bounds)
+    let points = [CGPoint(x: 1200, y: 1400), CGPoint(x: 2000, y: 1400)]
+    let patch = try ImageRenderer.mosaicPatch(from: colors, points: points, diameter: 20)
+    #expect(patch.image.width < 420 && patch.image.height < 20)
+    #expect(patch.image.dataProvider?.data.map { CFDataGetLength($0) } == patch.image.width * patch.image.height * 4)
+    #expect(patch.image.colorSpace?.name == CGColorSpace.sRGB)
+    let operation = EditOperation.mosaic(points, diameter: 20, blockSize: 24, patch: patch)
+    let full = try ImageRenderer.render(source: source, originalBounds: bounds, operations: [operation])
+    let scaled = try ImageRenderer.render(source: source, originalBounds: bounds, operations: [operation], maxDimension: 2048)
+    let a = try pixels(scaled.image), b = try pixels(full.image)
+    for x in stride(from: 1220, through: 1980, by: 40) {
+        for c in 0..<4 { #expect(a[(700 * 2048 + x / 2) * 4 + c] == b[(1400 * 4096 + x) * 4 + c]) }
+    }
+    let crop = CGRect(x: 1100, y: 1300, width: 1100, height: 200)
+    let cropped = try ImageRenderer.render(source: source, originalBounds: bounds, operations: [.crop(crop), operation])
+    let after = try ImageRenderer.render(source: source, originalBounds: bounds, operations: [operation, .crop(crop)])
+    #expect(try pixels(cropped.image) == pixels(after.image))
+    for format in [ImageFormat.png, .webp] {
+        let encoded = try ImageCodec.encode(cropped.image, format: format)
+        let input = try #require(CGImageSourceCreateWithData(encoded as CFData, nil))
+        let decoded = try #require(CGImageSourceCreateImageAtIndex(input, 0, nil))
+        #expect(decoded.width == 1100 && decoded.height == 200)
+        #expect(try pixels(decoded) == pixels(cropped.image))
+    }
+    var history = EditHistory(); history.append(operation); history.markSaved()
+    history.undo(); history.redo()
+    #expect(!history.isDirty && history.operations == [operation])
+    history.append(.crop(crop)); history.restoreSaved()
+    #expect(!history.isDirty && history.operations == [operation] && !history.canRedo)
 }
 
 @Test func pointerAnchoredZoomAndCoordinateRoundTrip() {
@@ -61,7 +136,7 @@ private func temporaryDirectory() throws -> URL {
     #expect(abs(viewport.pan.y) < 0.000001)
 }
 
-@Test func undoRedoAndSavedBranches() {
+@Test func undoRedoAndSavedBranches() throws {
     var history = EditHistory()
     let rect = CGRect(x: 5, y: 6, width: 30, height: 20)
     history.append(.crop(rect)); history.markSaved()
@@ -69,7 +144,7 @@ private func temporaryDirectory() throws -> URL {
     history.undo(); #expect(history.isDirty)
     history.redo(); #expect(!history.isDirty)
     history.undo()
-    let mosaic = EditOperation.mosaic([CGPoint(x: 20, y: 20)], diameter: 24, blockSize: 12)
+    let mosaic = try mosaic([CGPoint(x: 20, y: 20)], diameter: 24, blockSize: 12)
     history.append(mosaic)
     #expect(history.isDirty && !history.canRedo)
     history.undo(); history.redo()
@@ -98,7 +173,7 @@ private func temporaryDirectory() throws -> URL {
 
 @Test func restoreSavedPreservesCheckpointAndDropsUnsavedBranches() throws {
     var history = EditHistory()
-    let mosaic = EditOperation.mosaic([CGPoint(x: 40, y: 40)], diameter: 20, blockSize: 8)
+    let mosaic = try mosaic([CGPoint(x: 40, y: 40)], diameter: 20, blockSize: 8)
     history.append(mosaic)
     history.restoreSaved()
     #expect(history.operations.isEmpty && !history.isDirty && !history.canUndo && !history.canRedo)
@@ -128,7 +203,7 @@ private func temporaryDirectory() throws -> URL {
     let source = try image()
     let bounds = CGRect(x: 0, y: 0, width: 100, height: 80)
     var history = EditHistory()
-    history.append(.mosaic([CGPoint(x: 40, y: 40)], diameter: 40, blockSize: 16))
+    history.append(try mosaic([CGPoint(x: 40, y: 40)], diameter: 40, blockSize: 16))
     let result = try ImageRenderer.render(source: source, originalBounds: bounds, operations: history.operations)
     let original = try pixels(source), edited = try pixels(result.image)
     #expect(original.prefix(40) == edited.prefix(40))
@@ -148,7 +223,7 @@ private func temporaryDirectory() throws -> URL {
     let source = try image(), bounds = CGRect(x: 0, y: 0, width: 100, height: 80)
     let ink = Ink(red: 1, green: 0, blue: 0, alpha: 0.5)
     let operations: [EditOperation] = [.crop(CGRect(x: 1, y: 1, width: 60, height: 40)),
-        .mosaic([CGPoint(x: 35, y: 35)], diameter: 30, blockSize: 12),
+        try mosaic([CGPoint(x: 35, y: 35)], diameter: 30, blockSize: 12),
         .rectangle(CGRect(x: 10, y: 10, width: 50, height: 50), ink: ink, width: 5),
         .pencil([CGPoint(x: 10, y: 20), CGPoint(x: 80, y: 60)], ink: ink, width: 8)]
     for operation in operations {
@@ -163,7 +238,7 @@ private func temporaryDirectory() throws -> URL {
 @Test func fastMosaicStrokeHasNoGapsAndClipsToImage() throws {
     let source = try image(), bounds = CGRect(x: 0, y: 0, width: 100, height: 80)
     let result = try ImageRenderer.render(source: source, originalBounds: bounds, operations: [
-        .mosaic([CGPoint(x: -20, y: 40), CGPoint(x: 120, y: 40)], diameter: 12, blockSize: 16)
+        try mosaic([CGPoint(x: -20, y: 40), CGPoint(x: 120, y: 40)], diameter: 12, blockSize: 16)
     ])
     let original = try pixels(source), edited = try pixels(result.image)
     for x in [0, 20, 35, 60, 75, 99] {
@@ -178,16 +253,16 @@ private func temporaryDirectory() throws -> URL {
     let source = try image(), bounds = CGRect(x: 0, y: 0, width: 100, height: 80)
     let point = CGPoint(x: 40, y: 40)
     let click = try ImageRenderer.render(source: source, originalBounds: bounds,
-        operations: [.mosaic([point], diameter: 24, blockSize: 12)])
+        operations: [try mosaic([point], diameter: 24, blockSize: 12)])
     let stationary = try ImageRenderer.render(source: source, originalBounds: bounds,
-        operations: [.mosaic([point, point, point], diameter: 24, blockSize: 12)])
+        operations: [try mosaic([point, point, point], diameter: 24, blockSize: 12)])
     #expect(try pixels(stationary.image) == pixels(click.image))
 }
 
 @Test func mosaicPreservesAlphaAndWebPTransparency() throws {
     let source = try image(alpha: 128), bounds = CGRect(x: 0, y: 0, width: 100, height: 80)
     let result = try ImageRenderer.render(source: source, originalBounds: bounds, operations: [
-        .mosaic([CGPoint(x: 20, y: 30), CGPoint(x: 70, y: 30)], diameter: 24, blockSize: 12)
+        try mosaic([CGPoint(x: 20, y: 30), CGPoint(x: 70, y: 30)], diameter: 24, blockSize: 12, source: source)
     ])
     let edited = try pixels(result.image)
     for pixel in stride(from: 3, to: edited.count, by: 4) { #expect(edited[pixel] == 128) }
@@ -196,7 +271,7 @@ private func temporaryDirectory() throws -> URL {
     let decoded = try #require(CGImageSourceCreateImageAtIndex(cgSource, 0, nil))
     #expect(try pixels(decoded)[(30 * 100 + 40) * 4 + 3] == 128)
     let transparent = try ImageRenderer.render(source: image(alpha: 0), originalBounds: bounds, operations: [
-        .mosaic([CGPoint(x: 0, y: 0), CGPoint(x: 100, y: 80)], diameter: 30, blockSize: 12)
+        try mosaic([CGPoint(x: 0, y: 0), CGPoint(x: 100, y: 80)], diameter: 30, blockSize: 12, source: image(alpha: 0))
     ])
     #expect(try pixels(transparent.image).allSatisfy { $0 == 0 })
 }
@@ -204,7 +279,7 @@ private func temporaryDirectory() throws -> URL {
 @Test func croppedMosaicUsesOriginalCoordinatesAndStableGrid() throws {
     let source = try image(), bounds = CGRect(x: 0, y: 0, width: 100, height: 80)
     let crop = CGRect(x: 20, y: 10, width: 60, height: 50)
-    let brush = EditOperation.mosaic([CGPoint(x: 40, y: 32), CGPoint(x: 60, y: 32)], diameter: 16, blockSize: 8)
+    let brush = try mosaic([CGPoint(x: 40, y: 32), CGPoint(x: 60, y: 32)], diameter: 16, blockSize: 8)
     let afterCrop = try ImageRenderer.render(source: source, originalBounds: bounds, operations: [.crop(crop), brush])
     let beforeCrop = try ImageRenderer.render(source: source, originalBounds: bounds, operations: [brush, .crop(crop)])
     #expect(afterCrop.bounds == crop)
@@ -216,7 +291,7 @@ private func temporaryDirectory() throws -> URL {
 
 @Test func mosaicPreviewUsesSamePathAtDifferentResolutions() throws {
     let source = try image(width: 200, height: 160), bounds = CGRect(x: 0, y: 0, width: 200, height: 160)
-    let brush = EditOperation.mosaic([CGPoint(x: 50, y: 80), CGPoint(x: 150, y: 80)], diameter: 40, blockSize: 32)
+    let brush = try mosaic([CGPoint(x: 50, y: 80), CGPoint(x: 150, y: 80)], diameter: 40, blockSize: 32, source: source)
     let preview = try ImageRenderer.render(source: source, originalBounds: bounds, operations: [brush], maxDimension: 100)
     let full = try ImageRenderer.render(source: source, originalBounds: bounds, operations: [brush])
     let a = try pixels(preview.image), b = try pixels(full.image)

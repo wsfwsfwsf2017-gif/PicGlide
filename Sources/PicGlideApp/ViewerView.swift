@@ -59,7 +59,7 @@ struct ViewerView: View {
                 .font(.system(size: 19, weight: .medium)).frame(width: 44, height: 112)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(ClickableButtonStyle(help: enabled ? "\(title)（方向键）" : previous ? "已经是第一张" : "已经是最后一张"))
+        .buttonStyle(ClickableButtonStyle(help: enabled ? "\(title)（方向键）" : previous ? "第一张" : "最后一张"))
         .disabled(!enabled || model.isLoading)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.primary.opacity(0.08)))
@@ -95,7 +95,7 @@ struct ViewerView: View {
             Spacer(minLength: 0)
             Text(model.currentURL?.lastPathComponent ?? "")
                 .font(.system(size: 12, weight: .medium)).lineLimit(1).truncationMode(.middle)
-            if model.isDirty { Circle().fill(.orange).frame(width: 5, height: 5).help("有未保存的修改") }
+            if model.isDirty { Circle().fill(.orange).frame(width: 5, height: 5).help("未保存") }
             Text(model.dimensions).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
             Spacer(minLength: 0)
             Spacer().frame(width: 72)
@@ -120,18 +120,18 @@ struct ViewerView: View {
                     }
                     separator
                     iconButton("撤销", symbol: "arrow.uturn.backward", enabled: model.canUndo,
-                               help: model.canUndo ? "撤销（⌘Z）" : "没有可撤销的操作（⌘Z）", action: model.undo)
+                               help: model.canUndo ? "撤销（⌘Z）" : "无法撤销", action: model.undo)
                     iconButton("重做", symbol: "arrow.uturn.forward", enabled: model.canRedo,
-                               help: model.canRedo ? "重做（⇧⌘Z）" : "没有可重做的操作（⇧⌘Z）", action: model.redo)
+                               help: model.canRedo ? "重做（⇧⌘Z）" : "无法重做", action: model.redo)
                 } else {
                     iconButton("上一张", symbol: "chevron.left", enabled: model.index > 0,
-                               help: model.index > 0 ? "上一张（← / ↑）" : "已经是第一张") { model.navigate(-1) }
+                               help: model.index > 0 ? "上一张（← / ↑）" : "第一张") { model.navigate(-1) }
                     Text("\(model.index + 1) / \(model.files.count)")
                         .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
                         .lineLimit(1).frame(width: 78)
                         .help("第 \(model.index + 1) 张，共 \(model.files.count) 张")
                     iconButton("下一张", symbol: "chevron.right", enabled: model.index + 1 < model.files.count,
-                               help: model.index + 1 < model.files.count ? "下一张（→ / ↓）" : "已经是最后一张") { model.navigate(1) }
+                               help: model.index + 1 < model.files.count ? "下一张（→ / ↓）" : "最后一张") { model.navigate(1) }
                     separator
                 }
                 zoomMenu
@@ -147,7 +147,8 @@ struct ViewerView: View {
                         .font(.system(size: 12, weight: .medium)).lineLimit(1)
                         .frame(width: model.isEditing ? 76 : 48, height: 32)
                 }
-                .buttonStyle(ClickableButtonStyle(help: model.isEditing ? "返回浏览，保留修改（⌘E）" : "编辑图片（⌘E）"))
+                .buttonStyle(ClickableButtonStyle(help: model.isEditing ? "返回浏览（⌘E）" : "编辑（⌘E）"))
+                .disabled(model.pendingMosaicCount > 0)
                 Button { model.save() } label: {
                     Text("保存").font(.system(size: 12, weight: .medium)).frame(width: 52, height: 32)
                 }
@@ -161,7 +162,7 @@ struct ViewerView: View {
                     .menuStyle(.borderlessButton).menuIndicator(.hidden)
                     .frame(width: 32, height: 32)
                     .background(CursorRegion(cursor: .pointingHand, help: model.pendingCrop == nil
-                        ? "更多操作：另存为（⇧⌘S）" : "更多操作：先应用或取消裁剪，再另存为（⇧⌘S）"))
+                        ? "更多" : "先确认裁剪"))
                     .accessibilityLabel("更多操作").accessibilityHint("更多操作：另存为（⇧⌘S）")
                 }
             }
@@ -193,7 +194,7 @@ struct ViewerView: View {
         }
         .menuStyle(.borderlessButton).menuIndicator(.hidden)
         .frame(width: 64, height: 32)
-        .background(CursorRegion(cursor: .pointingHand, help: "缩放比例：适应窗口（⌘0）／原始尺寸（⌘1）"))
+        .background(CursorRegion(cursor: .pointingHand, help: "缩放"))
         .accessibilityLabel("缩放比例").accessibilityHint("适应窗口（⌘0）／原始尺寸（⌘1）")
     }
 
@@ -219,7 +220,7 @@ struct ViewerView: View {
         case .pencil, .rectangle:
             HStack(spacing: 9) {
                 Text("颜色").font(.system(size: 11)).foregroundStyle(.secondary)
-                ColorPicker("颜色", selection: $model.color, supportsOpacity: false).labelsHidden().frame(width: 30).help("选择绘制颜色")
+                ColorPicker("颜色", selection: $model.color, supportsOpacity: false).labelsHidden().frame(width: 30).help("颜色")
                 Text("粗细").font(.system(size: 11)).foregroundStyle(.secondary)
                 Slider(value: Binding(get: { model.lineWidth }, set: { model.lineWidth = $0.rounded() }), in: 1...64).frame(width: 94)
                     .background(CursorRegion(cursor: .arrow, help: "线条粗细，按图片像素计算")).accessibilityLabel("线条粗细")
@@ -235,15 +236,7 @@ struct ViewerView: View {
 
     private var separator: some View { Rectangle().fill(.primary.opacity(0.1)).frame(width: 1, height: 19).padding(.horizontal, 2) }
 
-    private func toolHelp(_ tool: EditTool) -> String {
-        switch tool {
-        case .hand: "拖动图片（按住空格可临时拖动）"
-        case .mosaic: "马赛克：用圆形画笔涂抹，Esc 取消当前笔迹"
-        case .crop: "裁剪：框选后拖动或调整边角，Enter 应用／Esc 取消"
-        case .rectangle: "画框：拖动绘制矩形标注框"
-        case .pencil: "铅笔：按住鼠标自由绘制"
-        }
-    }
+    private func toolHelp(_ tool: EditTool) -> String { tool.title }
 
     private func iconButton(_ title: String, symbol: String, enabled: Bool = true, help: String? = nil,
                             action: @escaping () -> Void) -> some View {
@@ -261,12 +254,12 @@ struct CropControls: View {
             Button(action: model.cancelCrop) {
                 Text("取消").font(.system(size: 12)).frame(width: 56, height: 32)
             }
-            .buttonStyle(ClickableButtonStyle(help: "取消当前裁剪选区（Esc）"))
+            .buttonStyle(ClickableButtonStyle(help: "取消（Esc）"))
             .keyboardShortcut(.cancelAction)
             Button(action: model.applyCrop) {
                 Text("应用 ↵").font(.system(size: 12, weight: .medium)).frame(width: 64, height: 32)
             }
-            .buttonStyle(ClickableButtonStyle(prominent: true, help: "应用裁剪，不自动保存（Enter）"))
+            .buttonStyle(ClickableButtonStyle(prominent: true, help: "应用（Enter）"))
             .keyboardShortcut(.defaultAction)
         }
         .padding(8).frame(width: 140, height: 48)

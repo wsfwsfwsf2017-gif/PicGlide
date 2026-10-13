@@ -72,7 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if allowTermination { return .terminateNow }
-        guard !model.isBusy else { return .terminateCancel }
+        guard !model.isBusy, model.pendingMosaicCount == 0 else { return .terminateCancel }
         if !model.isDirty { return .terminateNow }
         Task { [weak self] in
             guard let self else { return }
@@ -83,7 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if allowClose { return true }
-        guard !model.isBusy else { return false }
+        guard !model.isBusy, model.pendingMosaicCount == 0 else { return false }
         if !model.isDirty { return true }
         model.confirmLeaving { [weak self] in
             self?.allowClose = true; self?.allowTermination = true; sender.close()
@@ -152,7 +152,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         case #selector(redoEdit): model.canRedo
         case #selector(saveImage): model.canSave
         case #selector(saveCopy): model.canSaveCopy
-        case #selector(toggleEdit), #selector(fitImage), #selector(actualSize): model.frame != nil && !model.isBusy
+        case #selector(toggleEdit): model.frame != nil && !model.isBusy && model.pendingMosaicCount == 0
+        case #selector(fitImage), #selector(actualSize): model.frame != nil && !model.isBusy
         case #selector(previousImage): model.index > 0 && !model.isBusy
         case #selector(nextImage): model.index + 1 < model.files.count && !model.isBusy
         default: !model.isBusy

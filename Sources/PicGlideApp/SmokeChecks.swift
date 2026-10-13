@@ -36,8 +36,8 @@ func runSmokeChecks(delegate: AppDelegate) async {
         guard let data = bitmap.representation(using: .png, properties: [:]) else { return }
         try data.write(to: output.appendingPathComponent(name + ".png"))
     }
-    func canvasPatch(_ point: CGPoint, canvas: CanvasView) -> Data {
-        let rect = CGRect(x: point.x - 6, y: point.y - 6, width: 12, height: 12)
+    func canvasPatch(_ point: CGPoint, canvas: CanvasView, size: CGFloat = 12) -> Data {
+        let rect = CGRect(x: point.x - size / 2, y: point.y - size / 2, width: size, height: size)
         let bitmap = canvas.bitmapImageRepForCachingDisplay(in: rect)!
         canvas.cacheDisplay(in: rect, to: bitmap)
         return Data(bytes: bitmap.bitmapData!, count: bitmap.bytesPerRow * bitmap.pixelsHigh)
@@ -228,11 +228,85 @@ func runSmokeChecks(delegate: AppDelegate) async {
         }
         RunLoop.main.add(timer, forMode: .modalPanel)
     }
+    func checkFrozenMosaic(_ opacity: CGFloat) async throws {
+        let model = delegate.model, canvas = model.canvas!
+        let image = try ImageRenderer.context(width: 4096, height: 3072)
+        image.setFillColor(red: 240 / 255, green: 240 / 255, blue: 240 / 255, alpha: opacity)
+        image.fill(CGRect(x: 0, y: 0, width: 4096, height: 3072))
+        image.setBlendMode(.copy)
+        image.setFillColor(red: 8 / 255, green: 8 / 255, blue: 8 / 255, alpha: opacity)
+        for x in stride(from: 12, to: 4096, by: 24) { image.fill(CGRect(x: x, y: 0, width: 1, height: 3072)) }
+        for y in stride(from: 12, to: 3072, by: 24) { image.fill(CGRect(x: 0, y: y, width: 4096, height: 1)) }
+        let url = output.appendingPathComponent(opacity == 1 ? "contrast-4k.png" : "contrast-4k-alpha.png")
+        try ImageFiles.save(image: image.makeImage()!, format: .png, to: url)
+        model.requestOpen(url); try await wait { !model.isLoading && model.frame != nil }
+        model.setZoom(actualSize: true); canvas.update()
+        try await wait { model.frame?.image.width == 4096 }
+        model.toggleEditing(); try await wait { model.isEditing && !model.isPreparingEdit }
+        model.chooseTool(.mosaic); model.mosaicDiameter = 20; canvas.update()
+        let first = canvas.viewport.viewPoint(from: CGPoint(x: 1200, y: 1400))
+        let last = canvas.viewport.viewPoint(from: CGPoint(x: 2000, y: 1400))
+        let probes = stride(from: 1240, through: 1920, by: 80).map { canvas.viewport.viewPoint(from: CGPoint(x: $0, y: 1400)) }
+        gesture(.leftMouseDown, first, canvas: canvas)
+        try await wait { canvas.mosaicPreview != nil }
+        gesture(.leftMouseDragged, last, canvas: canvas)
+        let live = probes.map { canvasPatch($0, canvas: canvas, size: 2) }
+        let base = model.frame!.image, revision = model.frameRevision
+        gesture(.leftMouseUp, last, canvas: canvas)
+        for _ in 0..<24 {
+            guard probes.map({ canvasPatch($0, canvas: canvas, size: 2) }) == live,
+                  model.frame!.image === base, model.frameRevision == revision else {
+                fatalError("4K mosaic changes color, alpha, or backing frame after mouse-up")
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        guard case let .mosaic(_, diameter, _, patch) = model.history.operations.last,
+              diameter == 20, patch.image.width < 420, patch.image.height < 20 else { fatalError("Mosaic retains entire preview or wrong diameter") }
+        try capture(opacity == 1 ? "mosaic-4k-stable" : "mosaic-4k-alpha-stable")
+        model.setZoom(actualSize: false); canvas.update()
+        try await Task.sleep(for: .milliseconds(120))
+        model.setZoom(actualSize: true); canvas.update()
+        try await Task.sleep(for: .milliseconds(120))
+        guard probes.map({ canvasPatch($0, canvas: canvas, size: 2) }) == live else { fatalError("Zoom changes frozen mosaic") }
+        model.undo(); try await wait { model.frameRevision == model.editRevision }
+        model.redo(); try await wait { model.frameRevision == model.editRevision }
+        guard probes.map({ canvasPatch($0, canvas: canvas, size: 2) }) == live else { fatalError("Redo changes frozen mosaic") }
+        let crop = CGRect(x: 1000, y: 1200, width: 1400, height: 600)
+        model.commit(.crop(crop)); try await wait { model.frameRevision == model.editRevision }; canvas.update()
+        model.chooseTool(.mosaic); canvas.update()
+        let a = canvas.viewport.viewPoint(from: CGPoint(x: 1250, y: 1500)), b = canvas.viewport.viewPoint(from: CGPoint(x: 1950, y: 1500))
+        gesture(.leftMouseDown, a, canvas: canvas); try await wait { canvas.mosaicPreview != nil }
+        gesture(.leftMouseDragged, b, canvas: canvas)
+        let probe = canvas.viewport.viewPoint(from: CGPoint(x: 1600, y: 1500)), croppedLive = canvasPatch(probe, canvas: canvas, size: 2)
+        gesture(.leftMouseUp, b, canvas: canvas)
+        try await Task.sleep(for: .milliseconds(350))
+        guard canvasPatch(probe, canvas: canvas, size: 2) == croppedLive else { fatalError("Crop changes mosaic coordinates on commit") }
+        let count = model.history.operations.count
+        let dotA = canvas.viewport.viewPoint(from: CGPoint(x: 1450, y: 1600)), dotB = canvas.viewport.viewPoint(from: CGPoint(x: 1650, y: 1600))
+        gesture(.leftMouseDown, dotA, canvas: canvas); gesture(.leftMouseUp, dotA, canvas: canvas)
+        gesture(.leftMouseDown, dotB, canvas: canvas); gesture(.leftMouseUp, dotB, canvas: canvas)
+        guard model.pendingMosaicCount == 2, !model.canSave, !model.canSaveCopy, !model.canUndo,
+              model.history.operations.count == count else { fatalError("Fast clicks are dropped or allow early save") }
+        respondToAlert("好")
+        var earlySave = true
+        model.save { earlySave = $0 }
+        guard !earlySave else { fatalError("Save accepted unprepared strokes") }
+        try await wait { model.pendingMosaicCount == 0 }
+        guard model.history.operations.count == count + 2 else { fatalError("Fast clicks do not commit in order") }
+        gesture(.leftMouseDown, dotA, canvas: canvas); gesture(.leftMouseUp, dotA, canvas: canvas)
+        key(53, canvas: canvas); try await Task.sleep(for: .milliseconds(100))
+        guard model.pendingMosaicCount == 0, model.history.operations.count == count + 2 else { fatalError("Esc leaves a late pending stroke") }
+        model.save(); try await wait { !model.isSaving && !model.isDirty }
+        guard try ImageMetadata.read(url).pixelSize == crop.size else { fatalError("Frozen mosaic save loses crop dimensions") }
+        checks.append("4K mosaic entire mouse-up transition, zoom, redo, crop, queued clicks, save guard, Esc and export: alpha=\(opacity)")
+    }
     do {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         try? FileManager.default.removeItem(at: output.appendingPathComponent("ui-report.json"))
         try? FileManager.default.removeItem(at: output.appendingPathComponent("failure.txt"))
         try await Task.sleep(for: .milliseconds(500))
+        guard delegate.model.mosaicDiameter == 20 && delegate.model.blockSize == 24 else { fatalError("Incorrect default mosaic settings") }
+        checks.append("Default circular mosaic is 20px with 24px particles")
         guard fillsCurrentScreen(), !delegate.window.styleMask.contains(.fullScreen) else {
             fatalError("Launch did not fill current screen's available area as a normal window")
         }
@@ -373,7 +447,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try await hover(canvas)
         try await checkHeaderFill("Image window header fills desktop and restores frame")
         try await checkToolbarCursor(canvas, label: "Viewer native mouse: clickable hand, disabled/background arrow, canvas hand")
-        let editTip = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == "编辑图片（⌘E）" }!
+        let editTip = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == "编辑（⌘E）" }!
         try await checkTooltip(editTip, name: "tooltip-edit")
         let disabledSaveTip = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == model.saveHelp }!
         guard disabledSaveTip.cursor === NSCursor.arrow else { fatalError("Clean save cursor is not arrow") }
@@ -555,11 +629,15 @@ func runSmokeChecks(delegate: AppDelegate) async {
         model.chooseTool(.hand); canvas.update()
         guard canvasPatch(dot, canvas: canvas) == liveDot else { fatalError("Tool switch clears committed mosaic preview") }
         model.chooseTool(.mosaic); canvas.update()
-        guard case let .mosaic(points, _, _) = model.history.operations.last, points.count == 1 else { fatalError("Mosaic click is not a circle") }
+        guard case let .mosaic(points, _, _, _) = model.history.operations.last, points.count == 1 else { fatalError("Mosaic click is not a circle") }
         let nextDot = canvas.viewport.viewPoint(from: CGPoint(x: 750, y: 560))
         gesture(.leftMouseDown, nextDot, canvas: canvas); gesture(.leftMouseUp, nextDot, canvas: canvas)
         guard canvasPatch(dot, canvas: canvas) == liveDot else { fatalError("A fast second stroke removes the first") }
-        try await wait { model.frameRevision == model.editRevision }
+        try await wait { model.pendingMosaicCount == 0 && model.history.operations.count == beforeBrush + 3 }
+        for _ in 0..<20 {
+            try await Task.sleep(for: .milliseconds(25))
+            guard canvasPatch(dot, canvas: canvas) == liveDot else { fatalError("Mosaic changes after mouse-up") }
+        }
         try capture("mosaic-committed")
         checks.append("Fast consecutive mosaic strokes and tool switching preserve completed previews")
         model.undo(); try await wait { model.frameRevision == model.editRevision }
@@ -623,7 +701,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
         drag(canvas.viewport.viewPoint(from: CGPoint(x: 150, y: 100)),
              canvas.viewport.viewPoint(from: CGPoint(x: 1600, y: 1050)), canvas: canvas)
         try await Task.sleep(for: .milliseconds(150))
-        let floatingCancel = cursorRegions(in: canvas.cropControls!).first { $0.helpText == "取消当前裁剪选区（Esc）" }!
+        let floatingCancel = cursorRegions(in: canvas.cropControls!).first { $0.helpText == "取消（Esc）" }!
         let panBeforeCancel = canvas.viewport.pan
         let cancelPoint = floatingCancel.convert(NSPoint(x: floatingCancel.bounds.midX, y: floatingCancel.bounds.midY), to: nil)
         mouse(.leftMouseDown, at: cancelPoint); mouse(.leftMouseUp, at: cancelPoint)
@@ -636,7 +714,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
         drag(canvas.viewport.viewPoint(from: CGPoint(x: 150, y: 100)),
              canvas.viewport.viewPoint(from: CGPoint(x: 1600, y: 1050)), canvas: canvas)
         try await Task.sleep(for: .milliseconds(150))
-        let floatingApply = cursorRegions(in: canvas.cropControls!).first { $0.helpText == "应用裁剪，不自动保存（Enter）" }!
+        let floatingApply = cursorRegions(in: canvas.cropControls!).first { $0.helpText == "应用（Enter）" }!
         try await checkTooltip(floatingApply, name: "tooltip-crop-apply")
         let beforeFloatingClickPan = canvas.viewport.pan
         let cropOriginPosition = canvas.viewport.viewPoint(from: model.pendingCrop!.origin)
@@ -751,6 +829,8 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try await Task.sleep(for: .milliseconds(250))
         try await checkToolbarCursor(canvas, label: "Cursor regions restore after toolbar hide and reveal")
 
+        try await checkFrozenMosaic(1)
+        try await checkFrozenMosaic(0.5)
         let brushLargeURL = output.appendingPathComponent("24mp-brush.jpg")
         try autoreleasepool {
             let large = try ImageRenderer.context(width: 6000, height: 4000)

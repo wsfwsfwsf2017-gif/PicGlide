@@ -4,10 +4,13 @@ import CoreGraphics
 @preconcurrency import CoreImage
 import CoreImage.CIFilterBuiltins
 
-public struct RenderedImage: @unchecked Sendable {
+public struct RenderedImage: @unchecked Sendable, Equatable {
     public let image: CGImage
     public let bounds: CGRect
     public init(image: CGImage, bounds: CGRect) { self.image = image; self.bounds = bounds }
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.image === rhs.image && lhs.bounds == rhs.bounds
+    }
 }
 
 public enum ImageRenderer {
@@ -48,7 +51,39 @@ public enum ImageRenderer {
         let extent = CGRect(x: 0, y: 0, width: frame.image.width, height: frame.image.height)
         guard let result = filter.outputImage, let image = ciContext.createCGImage(result, from: extent)
         else { throw PicGlideError.invalidImage }
-        return image
+        // Materialize CI output before it crosses into the canvas or editing history.
+        let bitmap = try context(width: image.width, height: image.height)
+        bitmap.setBlendMode(.copy); bitmap.draw(image, in: extent)
+        guard let result = bitmap.makeImage() else { throw PicGlideError.invalidImage }
+        return result
+    }
+
+    public static func mosaicPatch(from frame: RenderedImage, points: [CGPoint], diameter: Double) throws -> RenderedImage {
+        let bounds = mosaicPath(points, diameter: diameter).boundingBoxOfPath.intersection(frame.bounds)
+        guard !bounds.isNull, !bounds.isEmpty else { throw PicGlideError.invalidImage }
+        let sx = CGFloat(frame.image.width) / frame.bounds.width, sy = CGFloat(frame.image.height) / frame.bounds.height
+        let pixels = CGRect(x: (bounds.minX - frame.bounds.minX) * sx, y: (bounds.minY - frame.bounds.minY) * sy,
+            width: bounds.width * sx, height: bounds.height * sy).insetBy(dx: -1, dy: -1).integral
+            .intersection(CGRect(x: 0, y: 0, width: frame.image.width, height: frame.image.height))
+        guard let cropped = frame.image.cropping(to: pixels) else { throw PicGlideError.invalidImage }
+        let bitmap = try context(width: Int(pixels.width), height: Int(pixels.height))
+        bitmap.setBlendMode(.copy); bitmap.interpolationQuality = .none
+        bitmap.draw(cropped, in: CGRect(x: 0, y: 0, width: pixels.width, height: pixels.height))
+        guard let image = bitmap.makeImage() else { throw PicGlideError.invalidImage }
+        return RenderedImage(image: image, bounds: CGRect(x: frame.bounds.minX + pixels.minX / sx,
+            y: frame.bounds.minY + pixels.minY / sy, width: pixels.width / sx, height: pixels.height / sy))
+    }
+
+    public static func drawMosaic(points: [CGPoint], diameter: Double, patch: RenderedImage,
+                                  in context: CGContext, transform: CGAffineTransform) {
+        var transform = transform
+        guard let mask = mosaicPath(points, diameter: diameter).copy(using: &transform) else { return }
+        context.saveGState(); context.addPath(mask); context.clip()
+        context.setBlendMode(.copy); context.interpolationQuality = .none
+        context.concatenate(transform)
+        context.translateBy(x: patch.bounds.minX, y: patch.bounds.maxY); context.scaleBy(x: 1, y: -1)
+        context.draw(patch.image, in: CGRect(origin: .zero, size: patch.bounds.size))
+        context.restoreGState()
     }
 
     public static func render(source: CGImage, originalBounds: CGRect,
@@ -83,18 +118,15 @@ public enum ImageRenderer {
             let context = try context(width: image.width, height: image.height)
             context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
             switch operation {
-            case let .mosaic(points, diameter, blockSize):
+            case let .mosaic(points, diameter, blockSize, patch):
                 guard diameter.isFinite, diameter > 0,
+                      blockSize.isFinite, blockSize > 0, !patch.bounds.isEmpty,
                       points.allSatisfy({ $0.x.isFinite && $0.y.isFinite }) else { throw PicGlideError.invalidImage }
                 let mask = mosaicPath(points, diameter: diameter)
                 guard !mask.isEmpty, mask.boundingBoxOfPath.intersects(bounds) else { continue }
-                let patch = try mosaicImage(RenderedImage(image: image, bounds: bounds), blockSize: blockSize)
-                var transform = CGAffineTransform(a: sx, b: 0, c: 0, d: -sy,
+                let transform = CGAffineTransform(a: sx, b: 0, c: 0, d: -sy,
                                                   tx: -bounds.minX * sx, ty: CGFloat(image.height) + bounds.minY * sy)
-                context.addPath(mask.copy(using: &transform)!)
-                context.clip()
-                context.setBlendMode(.copy)
-                context.draw(patch, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+                drawMosaic(points: points, diameter: diameter, patch: patch, in: context, transform: transform)
             case let .rectangle(rect, ink, width):
                 context.translateBy(x: 0, y: CGFloat(image.height))
                 context.scaleBy(x: sx, y: -sy)

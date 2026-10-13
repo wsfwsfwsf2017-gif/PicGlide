@@ -66,7 +66,7 @@ final class CursorRegionView: NSView {
     private weak var model: ViewerModel?
     var tooltipText: String {
         !helpText.isEmpty && (window as? PicGlideWindow)?.model?.isBusy == true
-            ? "\(helpText)\n图片正在处理，请稍候。" : helpText
+            ? "处理中" : helpText
     }
 
     init(model: ViewerModel?) {

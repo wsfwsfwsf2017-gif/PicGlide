@@ -28,10 +28,12 @@ final class CanvasView: NSView {
     private(set) var cropControls: NSHostingView<CropControls>?
     var mosaicPreview: CGImage? { mosaicFrame?.image }
     private var mosaicFrame: RenderedImage?
-    private var completedMosaics: [(revision: Int, operations: [EditOperation], preview: RenderedImage)] = []
+    private var completedMosaics: [(revision: Int, operations: [EditOperation])] = []
+    private var pendingMosaics: [(id: UUID, points: [CGPoint], diameter: Double, blockSize: Double)] = []
     private var mosaicTask: Task<Void, Never>?
     private var mosaicID = UUID()
-    private var strokeDiameter: Double = 80
+    private var mosaicTaskID = UUID()
+    private var strokeDiameter: Double = 20
     private var strokeBlockSize: Double = 24
     private var tracking: NSTrackingArea?
 
@@ -62,6 +64,7 @@ final class CanvasView: NSView {
         if imageID != model.imageID {
             imageID = model.imageID; fitMode = true
             viewport.pan = .zero; clearGesture()
+            cancelPendingMosaics()
             completedMosaics.removeAll()
         }
         if cancelID != model.cancelGestureID {
@@ -200,11 +203,11 @@ final class CanvasView: NSView {
 
         for completed in completedMosaics {
             if let operation = completed.operations.last {
-                drawMosaic(operation, preview: completed.preview, in: context)
+                drawMosaic(operation, in: context)
             }
         }
         if model.tool == .mosaic, !stroke.isEmpty, let mosaicFrame {
-            drawMosaic(.mosaic(stroke, diameter: strokeDiameter, blockSize: strokeBlockSize), preview: mosaicFrame, in: context)
+            drawMosaic(.mosaic(stroke, diameter: strokeDiameter, blockSize: strokeBlockSize, patch: mosaicFrame), in: context)
         }
         if paintingMosaic { context.endTransparencyLayer() }
         context.restoreGState()
@@ -259,17 +262,12 @@ final class CanvasView: NSView {
         }
     }
 
-    private func drawMosaic(_ operation: EditOperation, preview: RenderedImage, in context: CGContext) {
-        guard case let .mosaic(points, diameter, _) = operation else { return }
+    private func drawMosaic(_ operation: EditOperation, in context: CGContext) {
+        guard case let .mosaic(points, diameter, _, patch) = operation else { return }
         let origin = viewport.viewPoint(from: .zero)
-        var transform = CGAffineTransform(a: viewport.scale, b: 0, c: 0, d: viewport.scale, tx: origin.x, ty: origin.y)
-        let previewRect = CGRect(origin: viewport.viewPoint(from: preview.bounds.origin),
-            size: CGSize(width: preview.bounds.width * viewport.scale, height: preview.bounds.height * viewport.scale))
+        let transform = CGAffineTransform(a: viewport.scale, b: 0, c: 0, d: viewport.scale, tx: origin.x, ty: origin.y)
         context.saveGState(); context.clip(to: viewport.imageRect)
-        context.addPath(ImageRenderer.mosaicPath(points, diameter: diameter).copy(using: &transform)!)
-        context.clip(); context.setBlendMode(.copy)
-        context.translateBy(x: previewRect.minX, y: previewRect.maxY); context.scaleBy(x: 1, y: -1)
-        context.draw(preview.image, in: CGRect(origin: .zero, size: previewRect.size))
+        ImageRenderer.drawMosaic(points: points, diameter: diameter, patch: patch, in: context, transform: transform)
         context.restoreGState()
     }
 
@@ -323,18 +321,45 @@ final class CanvasView: NSView {
     }
 
     private func prepareMosaicPreview() {
-        let token = UUID(); mosaicID = token
-        let blockSize = strokeBlockSize
+        guard mosaicTask == nil else { return }
+        let token = UUID(); mosaicTaskID = token
         mosaicTask = Task { [weak self, model] in
             do {
-                let image = try await model.makeMosaicPreview(blockSize: blockSize)
-                guard !Task.isCancelled, let self, mosaicID == token else { return }
-                mosaicFrame = image; needsDisplay = true
+                while !Task.isCancelled {
+                    guard let self, mosaicTaskID == token else { return }
+                    let pending = pendingMosaics.first
+                    if pending == nil && (dragStart == nil || stroke.isEmpty || model.tool != .mosaic || mosaicFrame != nil) { break }
+                    let id = pending?.id ?? mosaicID, blockSize = pending?.blockSize ?? strokeBlockSize
+                    let image = try await model.makeMosaicPreview(blockSize: blockSize)
+                    guard !Task.isCancelled, mosaicTaskID == token else { return }
+                    if pendingMosaics.first?.id == id {
+                        let finished = pendingMosaics.removeFirst()
+                        try commitMosaic(finished.points, diameter: finished.diameter, blockSize: finished.blockSize, preview: image)
+                        model.pendingMosaicCount = pendingMosaics.count
+                    } else if mosaicID == id, dragStart != nil, model.tool == .mosaic {
+                        mosaicFrame = image; needsDisplay = true
+                    }
+                }
             } catch is CancellationError {} catch {
-                guard !Task.isCancelled, let self, mosaicID == token else { return }
-                clearGesture(); model.showError(error)
+                guard !Task.isCancelled, let self, mosaicTaskID == token else { return }
+                cancelPendingMosaics(); clearGesture(); model.showError(error)
             }
+            guard let self, mosaicTaskID == token else { return }
+            mosaicTask = nil
         }
+    }
+
+    private func commitMosaic(_ points: [CGPoint], diameter: Double, blockSize: Double, preview: RenderedImage) throws {
+        let patch = try ImageRenderer.mosaicPatch(from: preview, points: points, diameter: diameter)
+        if let revision = model.commit(.mosaic(points, diameter: diameter, blockSize: blockSize, patch: patch)) {
+            completedMosaics.append((revision, model.history.operations))
+            needsDisplay = true
+        }
+    }
+
+    func cancelPendingMosaics() {
+        pendingMosaics.removeAll(); model.pendingMosaicCount = 0
+        mosaicTask?.cancel(); mosaicTask = nil; mosaicTaskID = UUID()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -344,6 +369,7 @@ final class CanvasView: NSView {
         let point = convert(event.locationInWindow, from: nil)
         pointer = point
         isPanning = !model.isEditing || model.tool == .hand || spaceHeld
+        guard isPanning || model.tool == .mosaic || model.pendingMosaicCount == 0 else { return }
         if isPanning {
             dragStart = point; dragPan = viewport.pan; NSCursor.closedHand.set()
         } else {
@@ -358,6 +384,7 @@ final class CanvasView: NSView {
                 model.pendingCrop = nil
                 if model.tool == .pencil { stroke = [clamped(dragStart!)] }
                 if model.tool == .mosaic {
+                    mosaicID = UUID()
                     stroke = [dragStart!]; strokeDiameter = model.mosaicDiameter; strokeBlockSize = model.blockSize
                     prepareMosaicPreview()
                 }
@@ -408,10 +435,14 @@ final class CanvasView: NSView {
             case .mosaic:
                 let last = viewport.imagePoint(from: convert(event.locationInWindow, from: nil))
                 if stroke.last != last { stroke.append(last) }
-                if !stroke.isEmpty, let revision = model.commit(.mosaic(stroke, diameter: strokeDiameter, blockSize: strokeBlockSize)),
-                   let mosaicFrame {
-                    // Keep the displayed stroke until the matching committed frame replaces it.
-                    completedMosaics.append((revision, model.history.operations, mosaicFrame))
+                if !stroke.isEmpty {
+                    if let mosaicFrame, pendingMosaics.isEmpty {
+                        do { try commitMosaic(stroke, diameter: strokeDiameter, blockSize: strokeBlockSize, preview: mosaicFrame) }
+                        catch { model.showError(error) }
+                    } else {
+                        pendingMosaics.append((mosaicID, stroke, strokeDiameter, strokeBlockSize))
+                        model.pendingMosaicCount = pendingMosaics.count
+                    }
                 }
             case .rectangle:
                 if let selection, selection.width >= 1, selection.height >= 1 {
@@ -420,7 +451,9 @@ final class CanvasView: NSView {
             case .hand: break
             }
         }
-        clearGesture(); updateCropControls(); window?.invalidateCursorRects(for: self); needsDisplay = true
+        clearGesture()
+        if !pendingMosaics.isEmpty { prepareMosaicPreview() }
+        updateCropControls(); window?.invalidateCursorRects(for: self); needsDisplay = true
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -448,6 +481,10 @@ final class CanvasView: NSView {
         case 53:
             if model.isEditing && model.tool == .crop { clearGesture(); model.cancelCrop() }
             else if dragStart != nil { clearGesture() }
+            else if !pendingMosaics.isEmpty {
+                pendingMosaics.removeLast(); model.pendingMosaicCount = pendingMosaics.count
+                if pendingMosaics.isEmpty { cancelPendingMosaics() }
+            }
             else { model.chooseTool(.hand) }
             updateCropControls(); window?.invalidateCursorRects(for: self); needsDisplay = true
         default: super.keyDown(with: event)
@@ -467,7 +504,8 @@ final class CanvasView: NSView {
     private func clearGesture() {
         dragStart = nil; selection = nil; stroke.removeAll(); isPanning = false
         cropAdjustment = nil; cropStart = nil; model.isDrawing = false
-        mosaicTask?.cancel(); mosaicTask = nil; mosaicID = UUID(); mosaicFrame = nil
+        if pendingMosaics.isEmpty { cancelPendingMosaics() }
+        mosaicID = UUID(); mosaicFrame = nil
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {

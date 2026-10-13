@@ -35,8 +35,9 @@ final class ViewerModel {
     var lineWidth: Double = 6
     var opacity: Double = 1
     var blockSize: Double = 24
-    var mosaicDiameter: Double = 80
+    var mosaicDiameter: Double = 20
     var isDrawing = false
+    var pendingMosaicCount = 0
     var pendingCrop: CGRect?
     var cancelGestureID = UUID()
     var viewportCommand: (id: UUID, actualSize: Bool)?
@@ -65,20 +66,20 @@ final class ViewerModel {
     var index: Int { currentURL.flatMap { files.firstIndex(of: $0) } ?? 0 }
     var isDirty: Bool { history.isDirty }
     var isBusy: Bool { isSaving || isPreparingEdit }
-    var canUndo: Bool { history.canUndo && !isBusy }
-    var canRedo: Bool { history.canRedo && !isBusy }
-    var canSave: Bool { isDirty && !isBusy && !isDrawing && pendingCrop == nil }
-    var canSaveCopy: Bool { frame != nil && !isBusy && !isDrawing && pendingCrop == nil }
-    var canRestore: Bool { isEditing && !isBusy && (isDirty || pendingCrop != nil || isDrawing) }
+    var canUndo: Bool { history.canUndo && !isBusy && pendingMosaicCount == 0 }
+    var canRedo: Bool { history.canRedo && !isBusy && pendingMosaicCount == 0 }
+    var canSave: Bool { isDirty && !isBusy && !isDrawing && pendingMosaicCount == 0 && pendingCrop == nil }
+    var canSaveCopy: Bool { frame != nil && !isBusy && !isDrawing && pendingMosaicCount == 0 && pendingCrop == nil }
+    var canRestore: Bool { isEditing && !isBusy && (isDirty || pendingCrop != nil || isDrawing || pendingMosaicCount > 0) }
     var restoreHelp: String {
-        if isBusy { return "请等待当前操作结束，再恢复" }
-        return canRestore ? "恢复到最近一次保存，放弃未保存修改" : "没有需要恢复的修改"
+        if isBusy { return "处理中" }
+        return canRestore ? "恢复" : "没有修改"
     }
     var saveHelp: String {
-        if isBusy { return "请等待当前操作结束" }
-        if pendingCrop != nil { return "先应用或取消裁剪，再保存（⌘S）" }
-        if isDrawing { return "先结束当前绘制，再保存（⌘S）" }
-        return isDirty ? "覆盖保存（⌘S）" : "没有需要保存的修改（⌘S）"
+        if isBusy || pendingMosaicCount > 0 { return "处理中" }
+        if pendingCrop != nil { return "先确认裁剪" }
+        if isDrawing { return "绘制中" }
+        return isDirty ? "保存（⌘S）" : "没有修改"
     }
     var ink: Ink {
         let rgb = NSColor(color).usingColorSpace(.sRGB) ?? .systemBlue
@@ -115,7 +116,7 @@ final class ViewerModel {
     }
 
     func openPanel() {
-        guard !isBusy else { return }
+        guard !isBusy, pendingMosaicCount == 0 else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = ImageFormat.extensions.compactMap { UTType(filenameExtension: $0) }
         panel.canChooseDirectories = false
@@ -132,6 +133,7 @@ final class ViewerModel {
         currentURL = url; frame = nil; metadata = nil; source = nil
         fingerprint = nil; history = EditHistory(); pendingCrop = nil
         editRevision = 0; frameRevision = 0
+        pendingMosaicCount = 0
         isEditing = false; tool = .hand; isLoading = true; loadingError = nil
         requestedDimension = 2048
         revealControls()
@@ -158,7 +160,7 @@ final class ViewerModel {
     }
 
     func toggleEditing() {
-        guard frame != nil, !isBusy else { return }
+        guard frame != nil, !isBusy, pendingMosaicCount == 0 else { return }
         if isEditing {
             isEditing = false; tool = .hand; pendingCrop = nil; cancelGestureID = UUID()
             revealControls(); return
@@ -198,17 +200,21 @@ final class ViewerModel {
         guard isEditing, source != nil, !isBusy else { return nil }
         history.append(operation); pendingCrop = nil
         editRevision += 1
+        window?.isDocumentEdited = isDirty
+        if case .mosaic = operation {
+            // The canvas already displays this exact patch; do not regenerate it on mouse-up.
+            return editRevision
+        }
         if case .crop = operation, let frame,
            let cropped = try? ImageRenderer.render(source: frame.image, originalBounds: frame.bounds, operations: [operation]) {
             self.frame = cropped
         }
-        window?.isDocumentEdited = isDirty
         renderPreview(dimension: requestedDimension)
         return editRevision
     }
 
     func applyCrop() {
-        guard !isDrawing, let rect = pendingCrop, rect.width >= 1, rect.height >= 1 else { return }
+        guard !isDrawing, pendingMosaicCount == 0, let rect = pendingCrop, rect.width >= 1, rect.height >= 1 else { return }
         commit(.crop(rect.integral))
         chooseTool(.hand)
     }
@@ -237,6 +243,7 @@ final class ViewerModel {
         alert.addButton(withTitle: "取消").keyEquivalent = "\r"
         alert.addButton(withTitle: "恢复").hasDestructiveAction = true
         guard alert.runModal() == .alertSecondButtonReturn else { return }
+        canvas?.cancelPendingMosaics()
         history.restoreSaved(); editRevision += 1
         chooseTool(.hand)
         window?.isDocumentEdited = false
@@ -278,7 +285,8 @@ final class ViewerModel {
         Task { [weak self] in
             do {
                 let rendered = try await task.value
-                guard let self, generation == token, editRevision == revision, !task.isCancelled else { return }
+                guard let self, generation == token, revision >= frameRevision,
+                      history.operations.starts(with: operations), !task.isCancelled else { return }
                 frame = rendered; frameRevision = revision
             } catch is CancellationError {} catch {
                 guard let self, generation == token, !task.isCancelled else { return }
@@ -303,10 +311,10 @@ final class ViewerModel {
 
     func save(asCopy: Bool = false, completion: (@MainActor (Bool) -> Void)? = nil) {
         guard !isBusy, let url = currentURL, let metadata else { completion?(false); return }
-        guard pendingCrop == nil && !isDrawing else {
+        guard pendingCrop == nil && !isDrawing && pendingMosaicCount == 0 else {
             let alert = NSAlert()
-            alert.messageText = pendingCrop != nil ? "先应用或取消裁剪" : "先结束当前绘制"
-            alert.informativeText = pendingCrop != nil ? "当前裁剪选区尚未应用，确认裁剪后再保存图片。" : "松开鼠标完成绘制，或按 Esc 取消后再保存。"
+            alert.messageText = pendingMosaicCount > 0 ? "正在处理马赛克" : pendingCrop != nil ? "先应用或取消裁剪" : "先结束当前绘制"
+            alert.informativeText = pendingMosaicCount > 0 ? "处理完成后即可保存，或按 Esc 取消未完成的笔迹。" : pendingCrop != nil ? "当前裁剪选区尚未应用，确认裁剪后再保存图片。" : "松开鼠标完成绘制，或按 Esc 取消后再保存。"
             alert.addButton(withTitle: "好")
             alert.runModal(); completion?(false); return
         }
@@ -384,7 +392,7 @@ final class ViewerModel {
     }
 
     func confirmLeaving(_ action: @escaping @MainActor () -> Void) {
-        guard !isBusy else { NSSound.beep(); return }
+        guard !isBusy, pendingMosaicCount == 0 else { NSSound.beep(); return }
         guard isDirty else { action(); return }
         let alert = NSAlert()
         alert.messageText = "保存对图片的修改？"
