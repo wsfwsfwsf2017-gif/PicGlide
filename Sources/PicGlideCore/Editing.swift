@@ -20,7 +20,7 @@ public struct Ink: Equatable, Sendable {
 // Coordinates stay in the oriented original image, even after a crop.
 public enum EditOperation: Equatable, Sendable {
     case crop(CGRect)
-    case mosaic(CGRect, blockSize: Double)
+    case mosaic([CGPoint], diameter: Double, blockSize: Double)
     case rectangle(CGRect, ink: Ink, width: Double)
     case pencil([CGPoint], ink: Ink, width: Double)
 }

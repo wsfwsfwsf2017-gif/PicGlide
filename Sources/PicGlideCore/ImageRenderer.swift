@@ -22,6 +22,35 @@ public enum ImageRenderer {
         return context
     }
 
+    public static func mosaicPath(_ points: [CGPoint], diameter: Double) -> CGPath {
+        let path = CGMutablePath()
+        guard let first = points.first, diameter.isFinite, diameter > 0,
+              points.allSatisfy({ $0.x.isFinite && $0.y.isFinite }) else { return path }
+        if points.allSatisfy({ $0 == first }) {
+            path.addEllipse(in: CGRect(x: first.x - diameter / 2, y: first.y - diameter / 2,
+                                      width: diameter, height: diameter))
+            return path
+        }
+        path.move(to: first)
+        for point in points.dropFirst() { path.addLine(to: point) }
+        return path.copy(strokingWithWidth: diameter, lineCap: .round, lineJoin: .round, miterLimit: 1)
+    }
+
+    public static func mosaicImage(_ frame: RenderedImage, blockSize: Double) throws -> CGImage {
+        guard blockSize.isFinite, blockSize > 0 else { throw PicGlideError.invalidImage }
+        let sx = CGFloat(frame.image.width) / frame.bounds.width
+        let sy = CGFloat(frame.image.height) / frame.bounds.height
+        let filter = CIFilter.pixellate()
+        filter.inputImage = CIImage(cgImage: frame.image).clampedToExtent()
+        filter.scale = Float(max(1, blockSize * sx))
+        // Keep the pixel grid anchored in the original image across crops and preview resolutions.
+        filter.center = CGPoint(x: -frame.bounds.minX * sx, y: CGFloat(frame.image.height) + frame.bounds.minY * sy)
+        let extent = CGRect(x: 0, y: 0, width: frame.image.width, height: frame.image.height)
+        guard let result = filter.outputImage, let image = ciContext.createCGImage(result, from: extent)
+        else { throw PicGlideError.invalidImage }
+        return image
+    }
+
     public static func render(source: CGImage, originalBounds: CGRect,
                               operations: [EditOperation], maxDimension: Int? = nil) throws -> RenderedImage {
         var image = source
@@ -54,20 +83,18 @@ public enum ImageRenderer {
             let context = try context(width: image.width, height: image.height)
             context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
             switch operation {
-            case let .mosaic(rect, blockSize):
-                let region = localRect(rect.intersection(bounds)).integral.intersection(
-                    CGRect(x: 0, y: 0, width: image.width, height: image.height))
-                guard !region.isEmpty else { continue }
-                let ciRect = CGRect(x: region.minX, y: CGFloat(image.height) - region.maxY,
-                                    width: region.width, height: region.height)
-                let filter = CIFilter.pixellate()
-                filter.inputImage = CIImage(cgImage: image)
-                filter.scale = Float(max(1, blockSize * sx))
-                filter.center = .zero
-                guard let result = filter.outputImage,
-                      let patch = ciContext.createCGImage(result.cropped(to: ciRect), from: ciRect)
-                else { throw PicGlideError.invalidImage }
-                context.draw(patch, in: ciRect)
+            case let .mosaic(points, diameter, blockSize):
+                guard diameter.isFinite, diameter > 0,
+                      points.allSatisfy({ $0.x.isFinite && $0.y.isFinite }) else { throw PicGlideError.invalidImage }
+                let mask = mosaicPath(points, diameter: diameter)
+                guard !mask.isEmpty, mask.boundingBoxOfPath.intersects(bounds) else { continue }
+                let patch = try mosaicImage(RenderedImage(image: image, bounds: bounds), blockSize: blockSize)
+                var transform = CGAffineTransform(a: sx, b: 0, c: 0, d: -sy,
+                                                  tx: -bounds.minX * sx, ty: CGFloat(image.height) + bounds.minY * sy)
+                context.addPath(mask.copy(using: &transform)!)
+                context.clip()
+                context.setBlendMode(.copy)
+                context.draw(patch, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
             case let .rectangle(rect, ink, width):
                 context.translateBy(x: 0, y: CGFloat(image.height))
                 context.scaleBy(x: sx, y: -sy)

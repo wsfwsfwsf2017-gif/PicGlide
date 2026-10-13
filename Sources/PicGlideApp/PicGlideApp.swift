@@ -39,16 +39,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.center()
         let initialSize = window.frame.size
         window.setFrameAutosaveName("PicGlideWindow")
-        if let screen = window.screen, window.frame.equalTo(screen.visibleFrame) {
-            let area = screen.visibleFrame
-            let size = NSSize(width: min(initialSize.width, area.width), height: min(initialSize.height, area.height))
-            // Establish a restore size when the saved frame was already maximized.
-            window.setFrame(NSRect(x: area.midX - size.width / 2, y: area.midY - size.height / 2,
-                                   width: size.width, height: size.height), display: false)
-        }
         model.window = window
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        if let screen = window.screen, window.frame.equalTo(screen.visibleFrame) {
+            let area = screen.visibleFrame
+            let size = NSSize(width: min(initialSize.width, area.width), height: min(initialSize.height, area.height))
+            // Activation constrains saved frames to this screen; establish the restore size afterwards.
+            if window.isZoomed { window.zoom(nil) }
+            window.setFrame(NSRect(x: area.midX - size.width / 2, y: area.midY - size.height / 2,
+                                   width: size.width, height: size.height), display: false)
+        }
         window.fillScreen()
         if model.currentURL == nil, let argument = CommandLine.arguments.dropFirst().first,
            !argument.hasPrefix("-") { model.requestOpen(URL(fileURLWithPath: argument)) }
@@ -96,7 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func windowWillUseStandardFrame(_ window: NSWindow, defaultFrame newFrame: NSRect) -> NSRect {
-        window.screen?.visibleFrame ?? newFrame
+        return window.screen?.visibleFrame ?? newFrame
     }
 
     private func buildMenu() {
@@ -181,16 +182,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 @MainActor
 final class PicGlideWindow: NSWindow {
     weak var model: ViewerModel?
+    private var restoreFrame: NSRect?
 
     func fillScreen() {
         guard !styleMask.contains(.fullScreen), let screen else { return }
         let target = screen.visibleFrame
         guard !frame.equalTo(target) else { return }
+        restoreFrame = frame
         if isZoomed {
             setFrame(target, display: true)
         } else {
             zoom(nil)
         }
+    }
+
+    func toggleScreenFill() {
+        guard !styleMask.contains(.fullScreen), let screen else { return }
+        if !frame.equalTo(screen.visibleFrame) { fillScreen(); return }
+        zoom(nil)
+        // AppKit can restore a stale autosaved frame or the old display's frame.
+        if let restoreFrame, !frame.equalTo(restoreFrame) { setFrame(restoreFrame, display: true) }
     }
 
     func isHeaderLocation(_ point: NSPoint) -> Bool {
@@ -208,7 +219,7 @@ final class PicGlideWindow: NSWindow {
     override func sendEvent(_ event: NSEvent) {
         if event.type == .leftMouseDown, isHeaderLocation(event.locationInWindow) {
             if event.clickCount.isMultiple(of: 2) {
-                if !styleMask.contains(.fullScreen) { zoom(nil) }
+                toggleScreenFill()
                 return
             }
             if !styleMask.contains(.fullScreen) {
@@ -219,9 +230,11 @@ final class PicGlideWindow: NSWindow {
         super.sendEvent(event)
         switch event.type {
         case .mouseMoved, .leftMouseUp:
+            model?.canvas?.trackPointer(at: event.locationInWindow)
             model?.canvas?.updateNavigationHover(at: event.locationInWindow)
             updateCursor(at: event.locationInWindow)
         case .cursorUpdate, .mouseEntered, .mouseExited:
+            model?.canvas?.trackPointer(at: mouseLocationOutsideOfEventStream)
             model?.canvas?.updateNavigationHover(at: mouseLocationOutsideOfEventStream)
             updateCursor(at: mouseLocationOutsideOfEventStream)
         case .leftMouseDragged:
@@ -232,6 +245,9 @@ final class PicGlideWindow: NSWindow {
 
     private func updateCursor(at point: NSPoint) {
         guard isKeyWindow, let canvas = model?.canvas else { return }
+        if let contentView {
+            for region in CursorRegionView.regions(in: contentView) { region.refreshTooltip() }
+        }
         if let contentView, let cursor = CursorRegionView.cursor(at: point, in: contentView) {
             // SwiftUI hosting views can replace cursor rects registered by their transparent backgrounds.
             cursor.set()

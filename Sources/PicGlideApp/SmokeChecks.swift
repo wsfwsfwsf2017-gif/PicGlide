@@ -28,6 +28,8 @@ func runSmokeChecks(delegate: AppDelegate) async {
         throw NSError(domain: "PicGlideSmoke", code: 1, userInfo: [NSLocalizedDescriptionKey: "UI check timed out"])
     }
     func capture(_ name: String) throws {
+        delegate.window.contentView?.layoutSubtreeIfNeeded()
+        delegate.window.contentView?.displayIfNeeded()
         guard let view = delegate.window.contentView,
               let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
         view.cacheDisplay(in: view.bounds, to: bitmap)
@@ -44,15 +46,18 @@ func runSmokeChecks(delegate: AppDelegate) async {
             context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: code)!
         if up { canvas.keyUp(with: event) } else { canvas.keyDown(with: event) }
     }
+    func gesture(_ type: NSEvent.EventType, _ point: CGPoint, canvas: CanvasView) {
+        let event = NSEvent.mouseEvent(with: type, location: canvas.convert(point, to: nil), modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: delegate.window.windowNumber,
+            context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+        switch type { case .leftMouseDown: canvas.mouseDown(with: event)
+        case .leftMouseDragged: canvas.mouseDragged(with: event)
+        default: canvas.mouseUp(with: event) }
+    }
     func drag(_ first: CGPoint, _ last: CGPoint, canvas: CanvasView) {
-        for (type, point) in [(NSEvent.EventType.leftMouseDown, first), (.leftMouseDragged, last), (.leftMouseUp, last)] {
-            let event = NSEvent.mouseEvent(with: type, location: canvas.convert(point, to: nil), modifierFlags: [],
-                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: delegate.window.windowNumber,
-                context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
-            switch type { case .leftMouseDown: canvas.mouseDown(with: event)
-            case .leftMouseDragged: canvas.mouseDragged(with: event)
-            default: canvas.mouseUp(with: event) }
-        }
+        gesture(.leftMouseDown, first, canvas: canvas)
+        gesture(.leftMouseDragged, last, canvas: canvas)
+        gesture(.leftMouseUp, last, canvas: canvas)
     }
     func doubleClickHeader() {
         let event = NSEvent.mouseEvent(with: .leftMouseDown,
@@ -76,7 +81,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try await Task.sleep(for: .milliseconds(400))
         guard fillsCurrentScreen() != startedFilled else {
             throw NSError(domain: "PicGlideSmoke", code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "\(label): header double-click did not toggle screen fill: \(delegate.window.frame)"])
+                userInfo: [NSLocalizedDescriptionKey: "\(label): header double-click did not toggle screen fill: \(delegate.window.frame), zoomed=\(delegate.window.isZoomed), content=\(delegate.window.contentView!.bounds)"])
         }
         doubleClickHeader()
         try await Task.sleep(for: .milliseconds(400))
@@ -175,6 +180,19 @@ func runSmokeChecks(delegate: AppDelegate) async {
         guard NSCursor.current === canvas.canvasCursor else { fatalError("Canvas cursor did not restore") }
         checks.append(label)
     }
+    func checkTooltip(_ region: CursorRegionView, name: String) async throws {
+        guard !region.helpText.isEmpty else { fatalError("Missing native tooltip: \(name)") }
+        try await hover(delegate.model.canvas!)
+        try await wait { !NSApp.windows.contains { $0.isVisible && String(describing: type(of: $0)).contains("ToolTip") } }
+        try await hover(region)
+        try await wait { NSApp.windows.contains { $0.isVisible && String(describing: type(of: $0)).contains("ToolTip") } }
+        let tooltip = NSApp.windows.first { $0.isVisible && String(describing: type(of: $0)).contains("ToolTip") }!
+        if let view = tooltip.contentView, let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])?.write(to: output.appendingPathComponent(name + ".png"))
+        }
+        checks.append("Native tooltip appears: \(name)")
+    }
     func respondToAlert(_ title: String) {
         let timer = Timer(timeInterval: 0.2, repeats: false) { _ in
             MainActor.assumeIsolated {
@@ -198,12 +216,13 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         try? FileManager.default.removeItem(at: output.appendingPathComponent("ui-report.json"))
         try? FileManager.default.removeItem(at: output.appendingPathComponent("failure.txt"))
+        try await Task.sleep(for: .milliseconds(500))
         guard fillsCurrentScreen(), !delegate.window.styleMask.contains(.fullScreen) else {
             fatalError("Launch did not fill current screen's available area as a normal window")
         }
         checks.append("Launch fills current screen's available area as a normal window")
-        try capture("welcome")
         try await checkHeaderFill("Empty window header fills desktop and restores frame")
+        try capture("welcome")
         let originalFrame = delegate.window.frame
         for screen in NSScreen.screens {
             setUnzoomedWindowFrame(screen.visibleFrame.insetBy(dx: 100, dy: 100))
@@ -338,6 +357,11 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try await hover(canvas)
         try await checkHeaderFill("Image window header fills desktop and restores frame")
         try await checkToolbarCursor(canvas, label: "Viewer native mouse: clickable hand, disabled/background arrow, canvas hand")
+        let editTip = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == "编辑图片（⌘E）" }!
+        try await checkTooltip(editTip, name: "tooltip-edit")
+        let disabledSaveTip = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == model.saveHelp }!
+        guard disabledSaveTip.cursor === NSCursor.arrow else { fatalError("Clean save cursor is not arrow") }
+        try await checkTooltip(disabledSaveTip, name: "tooltip-disabled-save")
         let beforeWindowDrag = delegate.window.frame
         let headerPoint = NSPoint(x: beforeWindowDrag.width / 2, y: beforeWindowDrag.height - 16)
         let beforeHeaderPan = canvas.viewport.pan
@@ -351,7 +375,10 @@ func runSmokeChecks(delegate: AppDelegate) async {
         guard delegate.window.frame.origin != beforeWindowDrag.origin && canvas.viewport.pan == beforeHeaderPan else {
             throw NSError(domain: "PicGlideSmoke", code: 6, userInfo: [NSLocalizedDescriptionKey: "Native titlebar drag did not move only the window"])
         }
-        delegate.window.setFrame(beforeWindowDrag, display: true)
+        // A manual full-size frame resets AppKit's restore frame; establish a normal restore size before zooming.
+        setUnzoomedWindowFrame(beforeWindowDrag.insetBy(dx: 100, dy: 100))
+        delegate.window.fillScreen()
+        try await Task.sleep(for: .milliseconds(250))
         checks.append("Native header drag moves window without panning image")
         let canvasPoint = canvas.convert(NSPoint(x: canvas.bounds.midX, y: canvas.bounds.midY), to: nil)
         let beforeNativePan = canvas.viewport.pan
@@ -476,19 +503,72 @@ func runSmokeChecks(delegate: AppDelegate) async {
               try Data(contentsOf: fixture) == fileBeforeExit else { fatalError("Edge navigation bypassed unsaved-edit protection") }
         checks.append("Edge button triggers unsaved prompt and cancel preserves edits and file")
         model.toggleEditing(); model.chooseTool(.pencil); canvas.update()
+        try await Task.sleep(for: .milliseconds(250))
         checks.append("Return to browse preserves unsaved edits without writing file")
         model.chooseTool(.rectangle); canvas.update()
         drag(canvas.viewport.viewPoint(from: CGPoint(x: 900, y: 320)),
              canvas.viewport.viewPoint(from: CGPoint(x: 1450, y: 850)), canvas: canvas)
         model.chooseTool(.mosaic); canvas.update()
-        drag(canvas.viewport.viewPoint(from: CGPoint(x: 1000, y: 400)),
-             canvas.viewport.viewPoint(from: CGPoint(x: 1280, y: 650)), canvas: canvas)
+        let beforeBrush = model.history.operations.count
+        let brushFirst = canvas.viewport.viewPoint(from: CGPoint(x: 1000, y: 400))
+        let brushLast = canvas.viewport.viewPoint(from: CGPoint(x: 1280, y: 650))
+        try await hover(canvas, point: brushFirst)
+        mouse(.leftMouseDown, at: canvas.convert(brushFirst, to: nil))
+        try await wait { model.isDrawing }
+        mouse(.leftMouseDragged, at: canvas.convert(brushLast, to: nil))
+        try await wait { canvas.mosaicPreview != nil }
+        try await Task.sleep(for: .milliseconds(200))
+        guard model.isDrawing, model.history.operations.count == beforeBrush,
+              !model.canSave, canvas.mosaicPreview!.width <= 2048 else { fatalError("Brush preview changes history or enables save") }
+        try capture("mosaic-live-preview")
+        mouse(.leftMouseUp, at: canvas.convert(brushLast, to: nil))
+        try await wait { !model.isDrawing && model.history.operations.count == beforeBrush + 1 }
         try await Task.sleep(for: .milliseconds(300))
-        checks.append("Rectangle and mosaic gestures")
+        let dot = canvas.viewport.viewPoint(from: CGPoint(x: 800, y: 500))
+        gesture(.leftMouseDown, dot, canvas: canvas); gesture(.leftMouseUp, dot, canvas: canvas)
+        guard case let .mosaic(points, _, _) = model.history.operations.last, points.count == 1 else { fatalError("Mosaic click is not a circle") }
+        model.undo(); try await Task.sleep(for: .milliseconds(100))
+        let beforeCancel = model.history.operations
+        let savedBeforeCancel = try Data(contentsOf: fixture)
+        gesture(.leftMouseDown, brushFirst, canvas: canvas)
+        gesture(.leftMouseDragged, brushLast, canvas: canvas)
+        key(53, canvas: canvas)
+        try await Task.sleep(for: .milliseconds(150))
+        guard !model.isDrawing, canvas.mosaicPreview == nil, model.history.operations == beforeCancel,
+              try Data(contentsOf: fixture) == savedBeforeCancel else { fatalError("Cancel brush changed history, file, or leaves late preview") }
+        key(49, canvas: canvas)
+        guard canvas.canvasCursor === NSCursor.openHand else { fatalError("Space does not temporarily pan with mosaic") }
+        key(49, canvas: canvas, up: true)
+        checks.append("Circular mosaic live preview, click dot, continuous stroke, one undo entry, Esc cancellation and space pan")
         model.chooseTool(.crop); canvas.update()
         drag(canvas.viewport.viewPoint(from: CGPoint(x: 150, y: 100)),
              canvas.viewport.viewPoint(from: CGPoint(x: 1600, y: 1050)), canvas: canvas)
         let pending = model.pendingCrop
+        let beforeCropHistory = model.history.operations
+        try await Task.sleep(for: .milliseconds(150))
+        guard let cropControls = canvas.cropControls, !cropControls.isHidden,
+              canvas.bounds.contains(cropControls.frame),
+              !cropControls.frame.intersects(canvas.convert(model.toolbarCursorRegion!.cursorRect, from: model.toolbarCursorRegion!)),
+              model.toolbarCursorRegion!.cursorRect.height <= 49 else { fatalError("Crop controls overlap toolbar or crop adds a second row") }
+        try capture("crop-selection")
+        for adjustment in CropAdjustment.allCases {
+            let initial = model.pendingCrop!
+            let start = canvas.viewport.viewPoint(from: adjustment.point(in: initial))
+            let delta = CGPoint(x: 12, y: 8)
+            gesture(.leftMouseDown, start, canvas: canvas)
+            gesture(.leftMouseDragged, CGPoint(x: start.x + delta.x * canvas.viewport.scale,
+                                               y: start.y + delta.y * canvas.viewport.scale), canvas: canvas)
+            guard canvas.cropControls?.isHidden == true else { fatalError("Crop floating buttons remain visible during drag") }
+            gesture(.leftMouseUp, CGPoint(x: start.x + delta.x * canvas.viewport.scale,
+                                          y: start.y + delta.y * canvas.viewport.scale), canvas: canvas)
+            guard model.pendingCrop == adjustment.applying(to: initial, delta: delta, within: canvas.viewport.imageBounds),
+                  model.history.operations == beforeCropHistory else { fatalError("Crop adjustment changed wrong edge or history") }
+        }
+        checks.append("Crop selection moves and resizes from all eight handles without committing history")
+        drag(canvas.viewport.viewPoint(from: CGPoint(x: 10, y: 10)),
+             canvas.viewport.viewPoint(from: CGPoint(x: 1700, y: 1150)), canvas: canvas)
+        guard model.pendingCrop == CGRect(x: 10, y: 10, width: 1690, height: 1140) else { fatalError("Outside drag did not create a new crop") }
+        model.pendingCrop = pending; canvas.update()
         let beforeBlockedSave = try Data(contentsOf: fixture)
         guard pending != nil, !model.canSave, !model.canSaveCopy else { fatalError("Pending crop did not disable save") }
         for (action, asCopy) in [(#selector(AppDelegate.saveImage), false), (#selector(AppDelegate.saveCopy), true)] {
@@ -502,14 +582,39 @@ func runSmokeChecks(delegate: AppDelegate) async {
         }
         checks.append("Pending crop blocks save and Save As in controls, menu and shared save entry")
         key(53, canvas: canvas)
-        guard model.pendingCrop == nil, model.canSave else { fatalError("Cancel crop did not re-enable save") }
+        guard model.pendingCrop == nil, model.canSave, model.tool == .hand else { fatalError("Cancel crop did not re-enable save and return to hand") }
+        model.chooseTool(.crop); canvas.update()
         drag(canvas.viewport.viewPoint(from: CGPoint(x: 150, y: 100)),
              canvas.viewport.viewPoint(from: CGPoint(x: 1600, y: 1050)), canvas: canvas)
-        key(36, canvas: canvas)
-        try await wait { model.frame?.bounds.width == 1450 }
+        try await Task.sleep(for: .milliseconds(150))
+        let floatingCancel = cursorRegions(in: canvas.cropControls!).first { $0.helpText == "取消当前裁剪选区（Esc）" }!
+        let panBeforeCancel = canvas.viewport.pan
+        let cancelPoint = floatingCancel.convert(NSPoint(x: floatingCancel.bounds.midX, y: floatingCancel.bounds.midY), to: nil)
+        mouse(.leftMouseDown, at: cancelPoint); mouse(.leftMouseUp, at: cancelPoint)
+        try await wait { model.pendingCrop == nil && model.tool == .hand && canvas.cropControls == nil }
+        guard canvas.viewport.pan == panBeforeCancel, model.history.operations == beforeCropHistory else {
+            fatalError("Floating cancel panned canvas or changed committed edits")
+        }
+        checks.append("Floating crop cancel does not pan canvas or change committed edits")
+        model.chooseTool(.crop); canvas.update()
+        drag(canvas.viewport.viewPoint(from: CGPoint(x: 150, y: 100)),
+             canvas.viewport.viewPoint(from: CGPoint(x: 1600, y: 1050)), canvas: canvas)
+        try await Task.sleep(for: .milliseconds(150))
+        let floatingApply = cursorRegions(in: canvas.cropControls!).first { $0.helpText == "应用裁剪，不自动保存（Enter）" }!
+        try await checkTooltip(floatingApply, name: "tooltip-crop-apply")
+        let beforeFloatingClickPan = canvas.viewport.pan
+        let cropOriginPosition = canvas.viewport.viewPoint(from: model.pendingCrop!.origin)
+        let floatingPoint = floatingApply.convert(NSPoint(x: floatingApply.bounds.midX, y: floatingApply.bounds.midY), to: nil)
+        mouse(.leftMouseDown, at: floatingPoint); mouse(.leftMouseUp, at: floatingPoint)
+        try await wait { model.frame?.bounds.width == 1450 && canvas.cropControls == nil }
+        guard model.tool == .hand, model.isEditing, model.isDirty, canvas.cropControls == nil,
+              hypot(canvas.viewport.viewPoint(from: model.frame!.bounds.origin).x - cropOriginPosition.x,
+                    canvas.viewport.viewPoint(from: model.frame!.bounds.origin).y - cropOriginPosition.y) < 0.01 else {
+            fatalError("Floating apply panned image or did not complete crop in editor: \(beforeFloatingClickPan)")
+        }
         model.undo(); try await wait { model.frame?.bounds.width == 1800 }
         model.redo(); try await wait { model.frame?.bounds.width == 1450 }
-        checks.append("Crop, undo, redo")
+        checks.append("Floating crop apply does not pan canvas, preserves unsaved editor state, supports undo and redo")
         model.chooseTool(.pencil)
         try await Task.sleep(for: .milliseconds(150)); try capture("editor-light")
         delegate.window.appearance = NSAppearance(named: .darkAqua)
@@ -521,6 +626,30 @@ func runSmokeChecks(delegate: AppDelegate) async {
             try await Task.sleep(for: .milliseconds(100))
             checkToolbarLayout("Minimum-window \(tool.rawValue) toolbar fits within 96pt")
         }
+        model.chooseTool(.crop); canvas.update()
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            delegate.window.appearance = NSAppearance(named: appearance)
+            for screen in NSScreen.screens {
+                setUnzoomedWindowFrame(NSRect(origin: screen.visibleFrame.origin, size: NSSize(width: 620, height: 440)))
+                model.pendingCrop = canvas.viewport.imageBounds; canvas.update()
+                try await Task.sleep(for: .milliseconds(100))
+                guard let panel = canvas.cropControls, canvas.bounds.contains(panel.frame),
+                      !panel.frame.intersects(canvas.convert(model.toolbarCursorRegion!.cursorRect, from: model.toolbarCursorRegion!)) else {
+                    fatalError("Crop controls leave visible canvas or cover toolbar on \(screen.localizedName)")
+                }
+            }
+            try capture("crop-small-\(appearance == .aqua ? "light" : "dark")")
+        }
+        key(53, canvas: canvas)
+        checks.append("Floating crop controls remain visible above toolbar in minimum window, both themes and both displays")
+        model.chooseTool(.crop); canvas.update()
+        let cropBounds = model.frame!.bounds
+        model.pendingCrop = cropBounds.insetBy(dx: 10, dy: 10); canvas.update()
+        key(36, canvas: canvas)
+        try await wait { model.frame?.bounds.width == cropBounds.width - 20 }
+        guard model.tool == .hand else { fatalError("Enter did not exit crop") }
+        model.undo(); try await wait { model.frame?.bounds == cropBounds }
+        checks.append("Enter applies crop and returns to hand; Esc cancels without changing committed edits")
         model.chooseTool(.pencil); canvas.update()
         delegate.window.toggleFullScreen(nil)
         try await wait { delegate.window.styleMask.contains(.fullScreen) }
@@ -562,6 +691,35 @@ func runSmokeChecks(delegate: AppDelegate) async {
         checks.append("Toolbar hides after idle and reappears on mouse movement")
         try await Task.sleep(for: .milliseconds(250))
         try await checkToolbarCursor(canvas, label: "Cursor regions restore after toolbar hide and reveal")
+
+        let brushLargeURL = output.appendingPathComponent("24mp-brush.jpg")
+        try autoreleasepool {
+            let large = try ImageRenderer.context(width: 6000, height: 4000)
+            large.draw(image, in: CGRect(x: 0, y: 0, width: 6000, height: 4000))
+            try ImageFiles.save(image: large.makeImage()!, format: .jpeg, to: brushLargeURL)
+        }
+        model.requestOpen(brushLargeURL)
+        try await wait { !model.isLoading && model.frame != nil }
+        model.toggleEditing(); try await wait { model.isEditing && !model.isPreparingEdit }
+        model.chooseTool(.mosaic); model.mosaicDiameter = 320; canvas.update()
+        let brushStarted = Date()
+        gesture(.leftMouseDown, canvas.viewport.viewPoint(from: CGPoint(x: 2800, y: 2000)), canvas: canvas)
+        try await wait { canvas.mosaicPreview != nil }
+        measurements["mosaic24mpPreviewSeconds"] = Date().timeIntervalSince(brushStarted)
+        measurements["mosaic24mpPreviewWidth"] = canvas.mosaicPreview!.width
+        measurements["mosaic24mpResidentMiB"] = residentMiB()
+        guard canvas.mosaicPreview!.width <= 2048 else { fatalError("Brush preview processes original resolution") }
+        for step in 1...16 {
+            gesture(.leftMouseDragged, canvas.viewport.viewPoint(from: CGPoint(x: 2800 + step * 25, y: 2000)), canvas: canvas)
+            try await Task.sleep(for: .milliseconds(16))
+        }
+        try capture("mosaic-24mp-preview")
+        key(53, canvas: canvas)
+        guard !model.isDirty else { fatalError("Canceled large-image brush changed history") }
+        model.requestOpen(fixture); try await wait { !model.isLoading && model.frame != nil }
+        try await Task.sleep(for: .milliseconds(200))
+        measurements["afterMosaic24mpResidentMiB"] = residentMiB()
+        checks.append("24MP image uses a capped brush preview during continuous input and releases the canceled gesture")
 
         if ProcessInfo.processInfo.environment["PICGLIDE_PROFILE"] == "1" {
             let folder = output.appendingPathComponent("performance")

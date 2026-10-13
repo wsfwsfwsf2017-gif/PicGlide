@@ -33,6 +33,8 @@ final class ViewerModel {
     var lineWidth: Double = 6
     var opacity: Double = 1
     var blockSize: Double = 24
+    var mosaicDiameter: Double = 80
+    var isDrawing = false
     var pendingCrop: CGRect?
     var cancelGestureID = UUID()
     var viewportCommand: (id: UUID, actualSize: Bool)?
@@ -63,8 +65,14 @@ final class ViewerModel {
     var isBusy: Bool { isSaving || isPreparingEdit }
     var canUndo: Bool { history.canUndo && !isBusy }
     var canRedo: Bool { history.canRedo && !isBusy }
-    var canSave: Bool { isDirty && !isBusy && pendingCrop == nil }
-    var canSaveCopy: Bool { frame != nil && !isBusy && pendingCrop == nil }
+    var canSave: Bool { isDirty && !isBusy && !isDrawing && pendingCrop == nil }
+    var canSaveCopy: Bool { frame != nil && !isBusy && !isDrawing && pendingCrop == nil }
+    var saveHelp: String {
+        if isBusy { return "请等待当前操作结束" }
+        if pendingCrop != nil { return "先应用或取消裁剪，再保存（⌘S）" }
+        if isDrawing { return "先结束当前绘制，再保存（⌘S）" }
+        return isDirty ? "覆盖保存（⌘S）" : "没有需要保存的修改（⌘S）"
+    }
     var ink: Ink {
         let rgb = NSColor(color).usingColorSpace(.sRGB) ?? .systemBlue
         return Ink(red: rgb.redComponent, green: rgb.greenComponent, blue: rgb.blueComponent, alpha: opacity)
@@ -180,14 +188,21 @@ final class ViewerModel {
     func commit(_ operation: EditOperation) {
         guard isEditing, source != nil, !isBusy else { return }
         history.append(operation); pendingCrop = nil
+        if case .crop = operation, let frame,
+           let cropped = try? ImageRenderer.render(source: frame.image, originalBounds: frame.bounds, operations: [operation]) {
+            self.frame = cropped
+        }
         window?.isDocumentEdited = isDirty
         renderPreview(dimension: requestedDimension)
     }
 
     func applyCrop() {
-        guard let rect = pendingCrop, rect.width >= 1, rect.height >= 1 else { return }
+        guard !isDrawing, let rect = pendingCrop, rect.width >= 1, rect.height >= 1 else { return }
         commit(.crop(rect.integral))
+        chooseTool(.hand)
     }
+
+    func cancelCrop() { chooseTool(.hand) }
 
     func undo() {
         guard canUndo else { return }
@@ -245,12 +260,26 @@ final class ViewerModel {
         }
     }
 
+    func makeMosaicPreview(blockSize: Double) async throws -> CGImage {
+        guard let source, let metadata else { throw PicGlideError.invalidImage }
+        let operations = history.operations
+        let task = Task.detached(priority: .userInitiated) {
+            let frame = try ImageRenderer.render(source: source, originalBounds: metadata.bounds,
+                                                 operations: operations, maxDimension: 2048)
+            try Task.checkCancellation()
+            return try ImageRenderer.mosaicImage(frame, blockSize: blockSize)
+        }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: { task.cancel() }
+    }
+
     func save(asCopy: Bool = false, completion: (@MainActor (Bool) -> Void)? = nil) {
         guard !isBusy, let url = currentURL, let metadata else { completion?(false); return }
-        guard pendingCrop == nil else {
+        guard pendingCrop == nil && !isDrawing else {
             let alert = NSAlert()
-            alert.messageText = "先应用或取消裁剪"
-            alert.informativeText = "当前裁剪选区尚未应用，确认裁剪后再保存图片。"
+            alert.messageText = pendingCrop != nil ? "先应用或取消裁剪" : "先结束当前绘制"
+            alert.informativeText = pendingCrop != nil ? "当前裁剪选区尚未应用，确认裁剪后再保存图片。" : "松开鼠标完成绘制，或按 Esc 取消后再保存。"
             alert.addButton(withTitle: "好")
             alert.runModal(); completion?(false); return
         }

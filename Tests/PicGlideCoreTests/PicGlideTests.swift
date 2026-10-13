@@ -69,10 +69,11 @@ private func temporaryDirectory() throws -> URL {
     history.undo(); #expect(history.isDirty)
     history.redo(); #expect(!history.isDirty)
     history.undo()
-    history.append(.mosaic(rect, blockSize: 12))
+    let mosaic = EditOperation.mosaic([CGPoint(x: 20, y: 20)], diameter: 24, blockSize: 12)
+    history.append(mosaic)
     #expect(history.isDirty && !history.canRedo)
     history.undo(); history.redo()
-    #expect(history.operations == [.mosaic(rect, blockSize: 12)])
+    #expect(history.operations == [mosaic])
 }
 
 @Test func cropThenDrawingUsesOriginalCoordinates() throws {
@@ -95,18 +96,19 @@ private func temporaryDirectory() throws -> URL {
     #expect(croppedBytes[0] == 20 && croppedBytes[1] == 10)
 }
 
-@Test func mosaicStaysInsideSelectionAndUndoes() throws {
+@Test func mosaicStaysInsideCircleAndUndoes() throws {
     let source = try image()
     let bounds = CGRect(x: 0, y: 0, width: 100, height: 80)
-    let rect = CGRect(x: 20, y: 20, width: 40, height: 40)
     var history = EditHistory()
-    history.append(.mosaic(rect, blockSize: 16))
+    history.append(.mosaic([CGPoint(x: 40, y: 40)], diameter: 40, blockSize: 16))
     let result = try ImageRenderer.render(source: source, originalBounds: bounds, operations: history.operations)
     let original = try pixels(source), edited = try pixels(result.image)
     #expect(original.prefix(40) == edited.prefix(40))
-    let inside = (25 * 100 + 25) * 4
+    let corner = (22 * 100 + 22) * 4
+    #expect(Array(original[corner..<corner + 4]) == Array(edited[corner..<corner + 4]))
+    let inside = (40 * 100 + 35) * 4
     #expect(Array(original[inside..<inside + 3]) != Array(edited[inside..<inside + 3]))
-    let adjacent = (25 * 100 + 26) * 4
+    let adjacent = (40 * 100 + 36) * 4
     #expect(Array(edited[inside..<inside + 3]) == Array(edited[adjacent..<adjacent + 3]))
     history.undo()
     let restored = try ImageRenderer.render(source: source, originalBounds: bounds, operations: history.operations)
@@ -118,7 +120,7 @@ private func temporaryDirectory() throws -> URL {
     let source = try image(), bounds = CGRect(x: 0, y: 0, width: 100, height: 80)
     let ink = Ink(red: 1, green: 0, blue: 0, alpha: 0.5)
     let operations: [EditOperation] = [.crop(CGRect(x: 1, y: 1, width: 60, height: 40)),
-        .mosaic(CGRect(x: 20, y: 20, width: 30, height: 30), blockSize: 12),
+        .mosaic([CGPoint(x: 35, y: 35)], diameter: 30, blockSize: 12),
         .rectangle(CGRect(x: 10, y: 10, width: 50, height: 50), ink: ink, width: 5),
         .pencil([CGPoint(x: 10, y: 20), CGPoint(x: 80, y: 60)], ink: ink, width: 8)]
     for operation in operations {
@@ -128,6 +130,90 @@ private func temporaryDirectory() throws -> URL {
         #expect(try pixels(ImageRenderer.render(source: source, originalBounds: bounds, operations: history.operations).image) == pixels(source))
         history.redo(); #expect(history.operations == [operation])
     }
+}
+
+@Test func fastMosaicStrokeHasNoGapsAndClipsToImage() throws {
+    let source = try image(), bounds = CGRect(x: 0, y: 0, width: 100, height: 80)
+    let result = try ImageRenderer.render(source: source, originalBounds: bounds, operations: [
+        .mosaic([CGPoint(x: -20, y: 40), CGPoint(x: 120, y: 40)], diameter: 12, blockSize: 16)
+    ])
+    let original = try pixels(source), edited = try pixels(result.image)
+    for x in [0, 20, 35, 60, 75, 99] {
+        let inside = (41 * 100 + x) * 4
+        #expect(Array(original[inside..<inside + 3]) != Array(edited[inside..<inside + 3]))
+        let outside = (20 * 100 + x) * 4
+        #expect(Array(original[outside..<outside + 4]) == Array(edited[outside..<outside + 4]))
+    }
+}
+
+@Test func stationaryMosaicDragStillPaintsCircle() throws {
+    let source = try image(), bounds = CGRect(x: 0, y: 0, width: 100, height: 80)
+    let point = CGPoint(x: 40, y: 40)
+    let click = try ImageRenderer.render(source: source, originalBounds: bounds,
+        operations: [.mosaic([point], diameter: 24, blockSize: 12)])
+    let stationary = try ImageRenderer.render(source: source, originalBounds: bounds,
+        operations: [.mosaic([point, point, point], diameter: 24, blockSize: 12)])
+    #expect(try pixels(stationary.image) == pixels(click.image))
+}
+
+@Test func mosaicPreservesAlphaAndWebPTransparency() throws {
+    let source = try image(alpha: 128), bounds = CGRect(x: 0, y: 0, width: 100, height: 80)
+    let result = try ImageRenderer.render(source: source, originalBounds: bounds, operations: [
+        .mosaic([CGPoint(x: 20, y: 30), CGPoint(x: 70, y: 30)], diameter: 24, blockSize: 12)
+    ])
+    let edited = try pixels(result.image)
+    for pixel in stride(from: 3, to: edited.count, by: 4) { #expect(edited[pixel] == 128) }
+    let data = try ImageCodec.encode(result.image, format: .webp)
+    let cgSource = try #require(CGImageSourceCreateWithData(data as CFData, nil))
+    let decoded = try #require(CGImageSourceCreateImageAtIndex(cgSource, 0, nil))
+    #expect(try pixels(decoded)[(30 * 100 + 40) * 4 + 3] == 128)
+    let transparent = try ImageRenderer.render(source: image(alpha: 0), originalBounds: bounds, operations: [
+        .mosaic([CGPoint(x: 0, y: 0), CGPoint(x: 100, y: 80)], diameter: 30, blockSize: 12)
+    ])
+    #expect(try pixels(transparent.image).allSatisfy { $0 == 0 })
+}
+
+@Test func croppedMosaicUsesOriginalCoordinatesAndStableGrid() throws {
+    let source = try image(), bounds = CGRect(x: 0, y: 0, width: 100, height: 80)
+    let crop = CGRect(x: 20, y: 10, width: 60, height: 50)
+    let brush = EditOperation.mosaic([CGPoint(x: 40, y: 32), CGPoint(x: 60, y: 32)], diameter: 16, blockSize: 8)
+    let afterCrop = try ImageRenderer.render(source: source, originalBounds: bounds, operations: [.crop(crop), brush])
+    let beforeCrop = try ImageRenderer.render(source: source, originalBounds: bounds, operations: [brush, .crop(crop)])
+    #expect(afterCrop.bounds == crop)
+    #expect(try pixels(afterCrop.image) == pixels(beforeCrop.image))
+    let cropped = try ImageRenderer.render(source: source, originalBounds: bounds, operations: [.crop(crop)])
+    let fromPreview = try ImageRenderer.render(source: cropped.image, originalBounds: cropped.bounds, operations: [brush])
+    #expect(try pixels(fromPreview.image) == pixels(afterCrop.image))
+}
+
+@Test func mosaicPreviewUsesSamePathAtDifferentResolutions() throws {
+    let source = try image(width: 200, height: 160), bounds = CGRect(x: 0, y: 0, width: 200, height: 160)
+    let brush = EditOperation.mosaic([CGPoint(x: 50, y: 80), CGPoint(x: 150, y: 80)], diameter: 40, blockSize: 32)
+    let preview = try ImageRenderer.render(source: source, originalBounds: bounds, operations: [brush], maxDimension: 100)
+    let full = try ImageRenderer.render(source: source, originalBounds: bounds, operations: [brush])
+    let a = try pixels(preview.image), b = try pixels(full.image)
+    for (x, y) in [(40, 40), (50, 40), (60, 40)] {
+        for channel in 0..<4 { #expect(abs(Int(a[(y * 100 + x) * 4 + channel]) - Int(b[(y * 2 * 200 + x * 2) * 4 + channel])) <= 2) }
+    }
+    #expect(preview.bounds == bounds)
+    #expect(preview.image.width == 100)
+}
+
+@Test func cropAdjustmentsRespectBoundsAndMinimumSize() {
+    let bounds = CGRect(x: 20, y: 10, width: 100, height: 80)
+    let selection = CGRect(x: 40, y: 30, width: 50, height: 40)
+    for handle in CropAdjustment.allCases {
+        for delta in [CGPoint(x: -1000, y: -1000), CGPoint(x: 1000, y: 1000), CGPoint(x: 5, y: -7)] {
+            let result = handle.applying(to: selection, delta: delta, within: bounds)
+            #expect(bounds.contains(result))
+            #expect(result.width >= 1 && result.height >= 1)
+            if handle == .move { #expect(result.size == selection.size) }
+        }
+    }
+    #expect(CropAdjustment.topLeft.applying(to: selection, delta: CGPoint(x: 5, y: 7), within: bounds)
+        == CGRect(x: 45, y: 37, width: 45, height: 33))
+    #expect(CropAdjustment.bottomRight.applying(to: selection, delta: CGPoint(x: 8, y: 9), within: bounds)
+        == CGRect(x: 40, y: 30, width: 58, height: 49))
 }
 
 @Test func webPTransparencyRoundTrip() throws {
