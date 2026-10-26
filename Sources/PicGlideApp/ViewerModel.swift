@@ -46,6 +46,7 @@ final class ViewerModel {
     var toolbarHovered = false
     var navigationHover = 0
     var loadingError: String?
+    var savedFeedback = false
     weak var window: PicGlideWindow?
     @ObservationIgnored weak var canvas: CanvasView?
     @ObservationIgnored weak var toolbarCursorRegion: CursorRegionView?
@@ -62,6 +63,7 @@ final class ViewerModel {
     private var renderTask: Task<RenderedImage, Error>?
     private var resolutionTask: Task<Void, Never>?
     private var hideTask: Task<Void, Never>?
+    private var savedFeedbackTask: Task<Void, Never>?
 
     var index: Int { currentURL.flatMap { files.firstIndex(of: $0) } ?? 0 }
     var isDirty: Bool { history.isDirty }
@@ -70,7 +72,11 @@ final class ViewerModel {
     var canRedo: Bool { history.canRedo && !isBusy && pendingMosaicCount == 0 }
     var canSave: Bool { isDirty && !isBusy && !isDrawing && pendingMosaicCount == 0 && pendingCrop == nil }
     var canSaveCopy: Bool { frame != nil && !isBusy && !isDrawing && pendingMosaicCount == 0 && pendingCrop == nil }
-    var canRestore: Bool { isEditing && !isBusy && (isDirty || pendingCrop != nil || isDrawing || pendingMosaicCount > 0) }
+    var canRestore: Bool { frame != nil && !isBusy && (isDirty || pendingCrop != nil || isDrawing || pendingMosaicCount > 0) }
+    var hasToolOptions: Bool { isEditing && tool != .hand && tool != .crop }
+    var editorPanelHeight: CGFloat { hasToolOptions ? 92 : 48 }
+    var undoTitle: String { history.operationToUndo.map { "撤销" + $0.title } ?? "撤销" }
+    var redoTitle: String { history.operationToRedo.map { "重做" + $0.title } ?? "重做" }
     var restoreHelp: String {
         if isBusy { return "处理中" }
         return canRestore ? "恢复" : "没有修改"
@@ -98,7 +104,7 @@ final class ViewerModel {
             try? await Task.sleep(for: .seconds(2))
             guard !Task.isCancelled, let self, !isEditing, !toolbarHovered, !isBusy else { return }
             guard window?.firstResponder is CanvasView else { return }
-            withAnimation(.easeOut(duration: 0.18)) { controlsVisible = false }
+            controlsVisible = false
         }
     }
 
@@ -131,6 +137,7 @@ final class ViewerModel {
         generation = UUID(); imageID = UUID(); cancelGestureID = UUID()
         let token = generation
         currentURL = url; frame = nil; metadata = nil; source = nil
+        savedFeedbackTask?.cancel(); savedFeedback = false
         fingerprint = nil; history = EditHistory(); pendingCrop = nil
         editRevision = 0; frameRevision = 0
         pendingMosaicCount = 0
@@ -199,6 +206,7 @@ final class ViewerModel {
     func commit(_ operation: EditOperation) -> Int? {
         guard isEditing, source != nil, !isBusy else { return nil }
         history.append(operation); pendingCrop = nil
+        savedFeedback = false
         editRevision += 1
         window?.isDocumentEdited = isDirty
         if case .mosaic = operation {
@@ -224,6 +232,7 @@ final class ViewerModel {
     func undo() {
         guard canUndo else { return }
         cancelGestureID = UUID(); pendingCrop = nil; history.undo()
+        savedFeedback = false
         editRevision += 1
         window?.isDocumentEdited = isDirty; renderPreview(dimension: requestedDimension)
     }
@@ -231,6 +240,7 @@ final class ViewerModel {
     func redo() {
         guard canRedo else { return }
         cancelGestureID = UUID(); pendingCrop = nil; history.redo()
+        savedFeedback = false
         editRevision += 1
         window?.isDocumentEdited = isDirty; renderPreview(dimension: requestedDimension)
     }
@@ -241,10 +251,11 @@ final class ViewerModel {
         alert.messageText = "放弃未保存的修改？"
         alert.informativeText = "图片将恢复到最近一次保存的状态。已保存的内容会保留，放弃的修改无法撤销。"
         alert.addButton(withTitle: "取消").keyEquivalent = "\r"
-        alert.addButton(withTitle: "恢复").hasDestructiveAction = true
+        alert.addButton(withTitle: "还原").hasDestructiveAction = true
         guard alert.runModal() == .alertSecondButtonReturn else { return }
         canvas?.cancelPendingMosaics()
         history.restoreSaved(); editRevision += 1
+        savedFeedback = false
         chooseTool(.hand)
         window?.isDocumentEdited = false
         renderPreview(dimension: requestedDimension)
@@ -331,12 +342,14 @@ final class ViewerModel {
             popup.setAccessibilityLabel("保存格式")
             let formatAction = SaveFormatAction(panel: panel)
             popup.target = formatAction; popup.action = #selector(SaveFormatAction.selectFormat(_:))
-            panel.accessoryView = popup
+            let label = NSTextField(labelWithString: "格式")
+            let accessory = NSStackView(views: [label, popup])
+            accessory.orientation = .horizontal; accessory.spacing = 8
+            panel.accessoryView = accessory
             panel.allowedContentTypes = [.png]
             panel.allowsOtherFileTypes = false
             panel.nameFieldStringValue = url.deletingPathExtension().lastPathComponent + "-edited.png"
             panel.directoryURL = url.deletingLastPathComponent()
-            panel.message = "选择格式后保存图片。"
             let response = panel.runModal()
             withExtendedLifetime(formatAction) {}
             guard response == .OK, let selected = panel.url else { completion?(false); return }
@@ -358,6 +371,7 @@ final class ViewerModel {
         let base = source, operations = history.operations, token = generation
         let target = destination, selectedFormat = format
         isSaving = true; revealControls()
+        savedFeedbackTask?.cancel(); savedFeedback = false
         Task { [weak self, loader] in
             do {
                 let (savedFingerprint, original) = try await Task.detached(priority: .userInitiated) {
@@ -371,6 +385,12 @@ final class ViewerModel {
                 source = original; currentURL = target; fingerprint = savedFingerprint
                 saveFormat = selectedFormat; multiFrame = false
                 history.markSaved(); isSaving = false
+                savedFeedback = true
+                savedFeedbackTask = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(2))
+                    guard !Task.isCancelled else { return }
+                    self?.savedFeedback = false
+                }
                 window?.isDocumentEdited = false
                 window?.title = target.lastPathComponent + " — PicGlide"
                 if target.deletingLastPathComponent() != url.deletingLastPathComponent() {
@@ -410,6 +430,12 @@ final class ViewerModel {
         alert.messageText = "未能完成操作"; alert.informativeText = error.localizedDescription
         alert.addButton(withTitle: "好")
         alert.runModal()
+    }
+}
+
+private extension EditOperation {
+    var title: String {
+        switch self { case .crop: "裁剪"; case .mosaic: "马赛克"; case .rectangle: "画框"; case .pencil: "铅笔" }
     }
 }
 

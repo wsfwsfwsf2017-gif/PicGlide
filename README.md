@@ -43,13 +43,17 @@ GIF 等多帧图片编辑后需另存为静态图片。覆盖保存会改写原�
 
 “返回浏览”保留修改，保存需单独执行。离开有未保存修改的图片时，会提示保存、放弃或取消。
 
+## Agent 调用
+
+支持本地命令行查询图片信息、裁剪、马赛克、画框和铅笔操作，返回 JSON，仅生成新文件。调用方式见 [Agent 使用说明](docs/agent.md)；此能力随当前源码与后续安装版提供。
+
 ## 本地构建
 
 使用 Swift 6 和 Xcode Command Line Tools，首次构建由 SwiftPM 获取依赖。
 
 ```sh
 ./scripts/build-app.sh
-open build/PicGlide.app
+# 测试完成后更新 /Applications/PicGlide.app，并清理构建目录的展开副本
 ```
 
 运行测试：`./scripts/test.sh`。制作安装包：`./scripts/package-release.sh`。

@@ -1,9 +1,13 @@
 import AppKit
 import SwiftUI
+import Darwin
 
 @main @MainActor
 enum PicGlideApp {
     static func main() {
+        if CommandLine.arguments.dropFirst().first == "--cli" {
+            exit(AgentCommandLine.run(Array(CommandLine.arguments.dropFirst(2))))
+        }
         let application = NSApplication.shared
         #if DEBUG
         if let icon = NSImage(contentsOfFile: "Resources/AppIcon.png") { application.applicationIconImage = icon }
@@ -54,7 +58,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if model.currentURL == nil, let argument = CommandLine.arguments.dropFirst().first,
            !argument.hasPrefix("-") { model.requestOpen(URL(fileURLWithPath: argument)) }
         #if DEBUG
-        if ProcessInfo.processInfo.environment["PICGLIDE_SMOKE_OUTPUT"] != nil {
+        if let path = ProcessInfo.processInfo.environment["PICGLIDE_LAYOUT_OUTPUT"] {
+            Task { await runLayoutChecks(delegate: self, output: URL(fileURLWithPath: path)) }
+        } else if ProcessInfo.processInfo.environment["PICGLIDE_SMOKE_OUTPUT"] != nil {
             Task { await runSmokeChecks(delegate: self) }
         }
         #endif
@@ -127,6 +133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         file.addItem(.separator())
         item(file, "保存", #selector(saveImage), "s")
         item(file, "另存为…", #selector(saveCopy), "s", shift: true)
+        item(file, "还原到上次保存…", #selector(restoreImage))
         file.addItem(.separator())
         item(file, "关闭窗口", #selector(closeWindow), "w")
         let edit = menu("编辑")
@@ -148,23 +155,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
-        case #selector(undoEdit): model.canUndo
-        case #selector(redoEdit): model.canRedo
-        case #selector(saveImage): model.canSave
-        case #selector(saveCopy): model.canSaveCopy
-        case #selector(toggleEdit): model.frame != nil && !model.isBusy && model.pendingMosaicCount == 0
-        case #selector(fitImage), #selector(actualSize): model.frame != nil && !model.isBusy
-        case #selector(previousImage): model.index > 0 && !model.isBusy
-        case #selector(nextImage): model.index + 1 < model.files.count && !model.isBusy
-        default: !model.isBusy
+        case #selector(undoEdit):
+            if let editor = window?.firstResponder as? NSTextView { menuItem.title = "撤销输入"; return editor.undoManager?.canUndo == true }
+            menuItem.title = model.undoTitle; return model.canUndo
+        case #selector(redoEdit):
+            if let editor = window?.firstResponder as? NSTextView { menuItem.title = "重做输入"; return editor.undoManager?.canRedo == true }
+            menuItem.title = model.redoTitle; return model.canRedo
+        case #selector(saveImage): return model.canSave
+        case #selector(saveCopy): return model.canSaveCopy
+        case #selector(restoreImage): return model.canRestore
+        case #selector(toggleEdit): return model.frame != nil && !model.isBusy && model.pendingMosaicCount == 0
+        case #selector(fitImage), #selector(actualSize): return model.frame != nil && !model.isBusy
+        case #selector(previousImage): return model.index > 0 && !model.isBusy
+        case #selector(nextImage): return model.index + 1 < model.files.count && !model.isBusy
+        default: return !model.isBusy
         }
     }
 
     @objc func openImage() { model.openPanel() }
     @objc func saveImage() { model.save() }
     @objc func saveCopy() { model.save(asCopy: true) }
-    @objc func undoEdit() { model.undo() }
-    @objc func redoEdit() { model.redo() }
+    @objc func restoreImage() { model.restoreEdits() }
+    @objc func undoEdit() {
+        if let editor = window.firstResponder as? NSTextView { editor.undoManager?.undo() }
+        else { model.undo() }
+    }
+    @objc func redoEdit() {
+        if let editor = window.firstResponder as? NSTextView { editor.undoManager?.redo() }
+        else { model.redo() }
+    }
     @objc func toggleEdit() { model.toggleEditing() }
     @objc func fitImage() { model.setZoom(actualSize: false) }
     @objc func actualSize() { model.setZoom(actualSize: true) }
@@ -175,6 +194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "PicGlide",
             .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版",
+            .version: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "",
             .credits: NSAttributedString(string: "轻量看图，随手标注。\nWebP 编码：libwebp（BSD-3-Clause）")
         ])
     }
@@ -245,6 +265,9 @@ final class PicGlideWindow: NSWindow {
         let content = contentView.convert(contentView.bounds, to: nil)
         let header = NSRect(x: content.minX, y: content.maxY - 40, width: content.width, height: 40)
         guard header.contains(point) else { return false }
+        if CursorRegionView.regions(in: contentView).contains(where: {
+            !$0.helpText.isEmpty && $0.convert($0.cursorRect, to: nil).contains(point)
+        }) { return false }
         for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
             if let button = standardWindowButton(type), !button.isHidden,
                button.convert(button.bounds, to: nil).insetBy(dx: -3, dy: -3).contains(point) { return false }

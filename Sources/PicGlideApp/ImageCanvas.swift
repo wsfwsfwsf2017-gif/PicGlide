@@ -16,6 +16,7 @@ final class CanvasView: NSView {
     private var zoomCommandID: UUID?
     private var cancelID: UUID?
     private var fitMode = true
+    private var workspaceHeight: CGFloat = 0
     private var spaceHeld = false
     private var dragStart: CGPoint?
     private var dragPan: CGPoint = .zero
@@ -63,6 +64,7 @@ final class CanvasView: NSView {
     func update() {
         if imageID != model.imageID {
             imageID = model.imageID; fitMode = true
+            workspaceHeight = model.isEditing ? model.editorPanelHeight + 20 : 0
             viewport.pan = .zero; clearGesture()
             cancelPendingMosaics()
             completedMosaics.removeAll()
@@ -71,15 +73,14 @@ final class CanvasView: NSView {
             cancelID = model.cancelGestureID; clearGesture(); spaceHeld = false
         }
         if let frame = model.frame {
-            if model.isEditing { fitMode = false }
             if viewport.imageBounds != frame.bounds {
-                if fitMode && !model.isEditing { viewport.imageBounds = frame.bounds; viewport.fit() }
+                if fitMode && !model.isEditing { viewport.imageBounds = frame.bounds; viewport.fit(inset: 12) }
                 else { viewport.changeBounds(to: frame.bounds) }
             }
             if let command = model.viewportCommand, zoomCommandID != command.id {
                 zoomCommandID = command.id
                 fitMode = !command.actualSize
-                if fitMode { viewport.fit() }
+                if fitMode { viewport.fit(inset: 12) }
                 else { viewport.scale = 1 / (window?.backingScaleFactor ?? 2); viewport.pan = .zero }
             }
             setAccessibilityLabel(model.currentURL?.lastPathComponent ?? "图片画布")
@@ -92,8 +93,16 @@ final class CanvasView: NSView {
 
     override func layout() {
         super.layout()
+        let previous = viewport.viewSize
         viewport.viewSize = bounds.size
-        if fitMode { viewport.fit() }
+        let reserved = model.isEditing ? model.editorPanelHeight + 20 : 0
+        if workspaceHeight != reserved, previous != .zero {
+            // Keep the image at the same screen position when tool rows change the canvas height.
+            viewport.pan.x += (previous.width - bounds.width) / 2
+            viewport.pan.y += (previous.height - bounds.height) / 2
+            fitMode = false
+        } else if fitMode { viewport.fit(inset: 12) }
+        workspaceHeight = reserved
         notifyZoom(); updateCropControls(); needsDisplay = true
     }
 
@@ -300,21 +309,22 @@ final class CanvasView: NSView {
         let controls = cropControls!
         controls.isHidden = dragStart != nil || model.isBusy
         let area = visibleRect.intersection(bounds).insetBy(dx: 8, dy: 8)
-        guard area.width >= 140, area.height >= 48 else { controls.isHidden = true; return }
+        let controlWidth: CGFloat = 248
+        guard area.width >= controlWidth, area.height >= 48 else { controls.isHidden = true; return }
         let first = viewport.viewPoint(from: rect.origin)
         let selected = CGRect(x: first.x, y: first.y, width: rect.width * viewport.scale, height: rect.height * viewport.scale)
         let toolbar = model.toolbarCursorRegion.map { convert($0.cursorRect, from: $0).insetBy(dx: -10, dy: -10) } ?? .zero
         let origins = [
-            CGPoint(x: selected.maxX - 140, y: selected.maxY + 12),
-            CGPoint(x: selected.maxX - 140, y: selected.minY - 60),
-            CGPoint(x: selected.maxX - 152, y: selected.minY + 12),
-            CGPoint(x: selected.maxX - 140, y: toolbar.minY - 60)
+            CGPoint(x: selected.maxX - controlWidth, y: selected.maxY + 12),
+            CGPoint(x: selected.maxX - controlWidth, y: selected.minY - 60),
+            CGPoint(x: selected.maxX - controlWidth - 12, y: selected.minY + 12),
+            CGPoint(x: selected.maxX - controlWidth, y: area.maxY - 48)
         ]
         let candidates = origins.map { point in
-            CGRect(x: min(area.maxX - 140, max(area.minX, point.x)),
-                   y: min(area.maxY - 48, max(area.minY, point.y)), width: 140, height: 48)
+            CGRect(x: min(area.maxX - controlWidth, max(area.minX, point.x)),
+                   y: min(area.maxY - 48, max(area.minY, point.y)), width: controlWidth, height: 48)
         }
-        let fitting = origins.map { CGRect(origin: $0, size: NSSize(width: 140, height: 48)) }
+        let fitting = origins.map { CGRect(origin: $0, size: NSSize(width: controlWidth, height: 48)) }
             .first { area.contains($0) && !$0.intersects(toolbar) }
         controls.frame = fitting ?? candidates.first(where: { !$0.intersects(toolbar) }) ?? candidates.last!
         window?.invalidateCursorRects(for: self)

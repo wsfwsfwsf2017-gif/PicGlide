@@ -25,7 +25,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
             if predicate() { return }
             try await Task.sleep(for: .milliseconds(25))
         }
-        throw NSError(domain: "PicGlideSmoke", code: 1, userInfo: [NSLocalizedDescriptionKey: "UI check timed out"])
+        throw NSError(domain: "PicGlideSmoke", code: 1, userInfo: [NSLocalizedDescriptionKey: "UI check timed out after: \(checks.last ?? "start")"])
     }
     func capture(_ name: String) throws {
         delegate.window.contentView?.layoutSubtreeIfNeeded()
@@ -100,7 +100,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
     func cursorRegions(in view: NSView) -> [CursorRegionView] {
         (view as? CursorRegionView).map { [$0] } ?? view.subviews.flatMap(cursorRegions)
     }
-    func nativeControls(in view: NSView) -> [NSControl] {
+    @MainActor func nativeControls(in view: NSView) -> [NSControl] {
         (view as? NSControl).map { [$0] } ?? view.subviews.flatMap(nativeControls)
     }
     func navigationButton() -> CursorRegionView? {
@@ -246,7 +246,8 @@ func runSmokeChecks(delegate: AppDelegate) async {
         model.chooseTool(.mosaic); model.mosaicDiameter = 20; canvas.update()
         let first = canvas.viewport.viewPoint(from: CGPoint(x: 1200, y: 1400))
         let last = canvas.viewport.viewPoint(from: CGPoint(x: 2000, y: 1400))
-        let probes = stride(from: 1240, through: 1920, by: 80).map { canvas.viewport.viewPoint(from: CGPoint(x: $0, y: 1400)) }
+        let imageProbes = stride(from: 1240, through: 1920, by: 80).map { CGPoint(x: $0, y: 1400) }
+        var probes = imageProbes.map { canvas.viewport.viewPoint(from: $0) }
         gesture(.leftMouseDown, first, canvas: canvas)
         try await wait { canvas.mosaicPreview != nil }
         gesture(.leftMouseDragged, last, canvas: canvas)
@@ -267,6 +268,8 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try await Task.sleep(for: .milliseconds(120))
         model.setZoom(actualSize: true); canvas.update()
         try await Task.sleep(for: .milliseconds(120))
+        // Actual size recenters the image, so compare the same image pixels rather than old screen positions.
+        probes = imageProbes.map { canvas.viewport.viewPoint(from: $0) }
         guard probes.map({ canvasPatch($0, canvas: canvas, size: 2) }) == live else { fatalError("Zoom changes frozen mosaic") }
         model.undo(); try await wait { model.frameRevision == model.editRevision }
         model.redo(); try await wait { model.frameRevision == model.editRevision }
@@ -506,14 +509,20 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try await wait { !model.isLoading && model.currentURL == fixture }
         model.setZoom(actualSize: false)
         canvas.update()
-        let editButton = cursorRegions(in: delegate.window.contentView!)
-            .filter { $0.cursor === NSCursor.pointingHand }
-            .max { $0.convert(.zero, to: nil).x < $1.convert(.zero, to: nil).x }!
-        let panBeforeClick = canvas.viewport.pan
+        let editButton = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == "编辑（⌘E）" }!
+        let positionBeforeClick = canvas.convert(canvas.viewport.viewPoint(from: canvas.viewport.imageBounds.origin), to: nil)
+        let scaleBeforeClick = canvas.viewport.scale
+        for region in cursorRegions(in: delegate.window.contentView!).filter({ ["编辑（⌘E）", "保存选项", model.saveHelp].contains($0.helpText) }) {
+            let point = region.convert(NSPoint(x: region.bounds.midX, y: region.bounds.midY), to: nil)
+            guard !delegate.window.isHeaderLocation(point) else { fatalError("Header drag intercepts a file action") }
+        }
         let buttonCenter = editButton.convert(NSPoint(x: editButton.bounds.midX, y: editButton.bounds.midY), to: nil)
         mouse(.leftMouseDown, at: buttonCenter); mouse(.leftMouseUp, at: buttonCenter)
         try await wait { model.isEditing && !model.isPreparingEdit }
-        guard canvas.viewport.pan == panBeforeClick else { fatalError("Toolbar click panned image") }
+        try await Task.sleep(for: .milliseconds(150))
+        let positionAfterClick = canvas.convert(canvas.viewport.viewPoint(from: canvas.viewport.imageBounds.origin), to: nil)
+        guard hypot(positionAfterClick.x - positionBeforeClick.x, positionAfterClick.y - positionBeforeClick.y) < 0.1,
+              canvas.viewport.scale == scaleBeforeClick else { fatalError("Toolbar click moved or zoomed image") }
         checks.append("Native toolbar button click enters editor without panning image")
         try await Task.sleep(for: .milliseconds(100))
         model.chooseTool(.pencil); canvas.update()
@@ -540,20 +549,39 @@ func runSmokeChecks(delegate: AppDelegate) async {
             guard NSCursor.current === NSCursor.arrow else { fatalError("Native editor control cursor is not arrow") }
         }
         let sliders = cursorRegions(in: delegate.window.contentView!).filter {
-            $0.cursor === NSCursor.arrow && $0.cursorRect.width > 80 && $0.cursorRect.height < 30
+            $0.cursor === NSCursor.arrow && ["粗细", "透明度"].contains($0.helpText)
         }
         guard sliders.count == 2 else { fatalError("Editor slider cursor regions missing") }
         for slider in sliders {
             try await hover(slider)
             guard NSCursor.current === NSCursor.arrow else { fatalError("Slider hover did not use arrow") }
         }
-        let widthSlider = sliders.first { abs($0.cursorRect.width - 94) < 1 }!
+        let widthSlider = sliders.first { $0.helpText == "粗细" }!
         let sliderPoint = widthSlider.convert(NSPoint(x: widthSlider.bounds.width * 0.75, y: widthSlider.bounds.midY), to: nil)
         let originalWidth = model.lineWidth
         mouse(.leftMouseDown, at: sliderPoint); mouse(.leftMouseUp, at: sliderPoint)
         try await wait { model.lineWidth != originalWidth }
         model.lineWidth = originalWidth
         checks.append("Native slider hover uses arrow and click changes brush width")
+        try await Task.sleep(for: .milliseconds(150))
+        let widthField = nativeControls(in: delegate.window.contentView!).compactMap { $0 as? NSTextField }
+            .first { $0.identifier?.rawValue == "parameter.lineWidth" }!
+        let indexBeforeInput = model.index
+        widthField.selectText(nil)
+        let up = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: delegate.window.windowNumber,
+            context: nil, characters: "\u{F700}", charactersIgnoringModifiers: "\u{F700}", isARepeat: false, keyCode: 126)!
+        delegate.window.sendEvent(up)
+        guard model.lineWidth == originalWidth + 1, model.index == indexBeforeInput else {
+            throw NSError(domain: "PicGlideSmoke", code: 9, userInfo: [NSLocalizedDescriptionKey:
+                "Numeric arrow: before=\(originalWidth), after=\(model.lineWidth), field=\(widthField.stringValue), index=\(model.index)/\(indexBeforeInput), responder=\(String(describing: delegate.window.firstResponder)), editor=\(String(describing: widthField.currentEditor()))"])
+        }
+        widthField.stringValue = "18"
+        (widthField.currentEditor() as? NSTextView)?.string = "18"
+        delegate.window.makeFirstResponder(canvas)
+        guard model.lineWidth == 18 else { fatalError("Numeric field did not commit direct input") }
+        model.lineWidth = originalWidth
+        checks.append("Native number input commits values and arrow keys step without navigating")
         if let colorWell = controls.first(where: { $0 is NSColorWell }) as? NSColorWell {
             colorWell.performClick(nil)
             try await wait { NSColorPanel.shared.isVisible }
@@ -581,6 +609,13 @@ func runSmokeChecks(delegate: AppDelegate) async {
         guard !model.isEditing, model.isDirty, model.canSave,
               model.history.operations == editedOperations,
               try Data(contentsOf: fixture) == fileBeforeExit else { fatalError("Return to browse lost or saved edits") }
+        delegate.window.makeFirstResponder(canvas)
+        model.toolbarHovered = false; model.revealControls()
+        try await wait { !model.controlsVisible }
+        guard cursorRegions(in: delegate.window.contentView!).contains(where: {
+            $0.helpText == model.saveHelp && !$0.cursorRect.isEmpty
+        }) else { fatalError("Save disappears with idle browser toolbar") }
+        checks.append("Unsaved status and top save remain after browser controls auto-hide")
         try capture("viewer-unsaved")
         let dialog = output.appendingPathComponent("unsaved-dialog.png")
         try FileManager.default.removeItem(at: dialog)
@@ -598,7 +633,9 @@ func runSmokeChecks(delegate: AppDelegate) async {
         model.chooseTool(.rectangle); canvas.update()
         drag(canvas.viewport.viewPoint(from: CGPoint(x: 900, y: 320)),
              canvas.viewport.viewPoint(from: CGPoint(x: 1450, y: 850)), canvas: canvas)
+        try await wait { model.frameRevision == model.editRevision }
         model.chooseTool(.mosaic); canvas.update()
+        try await Task.sleep(for: .milliseconds(150))
         let beforeBrush = model.history.operations.count
         let brushFirst = canvas.viewport.viewPoint(from: CGPoint(x: 1000, y: 400))
         let brushLast = canvas.viewport.viewPoint(from: CGPoint(x: 1280, y: 650))
@@ -617,26 +654,27 @@ func runSmokeChecks(delegate: AppDelegate) async {
         let dot = canvas.viewport.viewPoint(from: CGPoint(x: 800, y: 500))
         gesture(.leftMouseDown, dot, canvas: canvas)
         try await wait { canvas.mosaicPreview != nil }
-        let liveDot = canvasPatch(dot, canvas: canvas)
+        // Sample inside the small brush, excluding the cursor ring that disappears with the hand tool.
+        let liveDot = canvasPatch(dot, canvas: canvas, size: 4)
         try capture("mosaic-before-release")
         gesture(.leftMouseUp, dot, canvas: canvas)
         try capture("mosaic-after-release")
-        guard canvasPatch(dot, canvas: canvas) == liveDot else {
+        guard canvasPatch(dot, canvas: canvas, size: 4) == liveDot else {
             throw NSError(domain: "PicGlideSmoke", code: 8,
                 userInfo: [NSLocalizedDescriptionKey: "Mosaic disappears on mouse-up before committed preview arrives"])
         }
         checks.append("Mosaic pixels remain visible between mouse-up and committed rendering")
         model.chooseTool(.hand); canvas.update()
-        guard canvasPatch(dot, canvas: canvas) == liveDot else { fatalError("Tool switch clears committed mosaic preview") }
+        guard canvasPatch(dot, canvas: canvas, size: 4) == liveDot else { fatalError("Tool switch clears committed mosaic preview") }
         model.chooseTool(.mosaic); canvas.update()
         guard case let .mosaic(points, _, _, _) = model.history.operations.last, points.count == 1 else { fatalError("Mosaic click is not a circle") }
         let nextDot = canvas.viewport.viewPoint(from: CGPoint(x: 750, y: 560))
         gesture(.leftMouseDown, nextDot, canvas: canvas); gesture(.leftMouseUp, nextDot, canvas: canvas)
-        guard canvasPatch(dot, canvas: canvas) == liveDot else { fatalError("A fast second stroke removes the first") }
+        guard canvasPatch(dot, canvas: canvas, size: 4) == liveDot else { fatalError("A fast second stroke removes the first") }
         try await wait { model.pendingMosaicCount == 0 && model.history.operations.count == beforeBrush + 3 }
         for _ in 0..<20 {
             try await Task.sleep(for: .milliseconds(25))
-            guard canvasPatch(dot, canvas: canvas) == liveDot else { fatalError("Mosaic changes after mouse-up") }
+            guard canvasPatch(dot, canvas: canvas, size: 4) == liveDot else { fatalError("Mosaic changes after mouse-up") }
         }
         try capture("mosaic-committed")
         checks.append("Fast consecutive mosaic strokes and tool switching preserve completed previews")
@@ -797,7 +835,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
         guard model.history.operations == restoreOperations && model.pendingCrop == restoreCrop else {
             fatalError("Cancel restore loses edits or crop selection")
         }
-        respondToAlert("恢复"); model.restoreEdits()
+        respondToAlert("还原"); model.restoreEdits()
         try await wait { model.frameRevision == model.editRevision }
         canvas.update()
         guard model.history.operations == savedOperations, !model.isDirty, !model.canRestore, !model.history.canRedo,
@@ -915,6 +953,15 @@ func runSmokeChecks(delegate: AppDelegate) async {
         print("PICGLIDE_UI_SMOKE_PASS \(checks.count) checks")
         passed = true
     } catch {
+        let state: [String: Any] = ["checks": checks, "measurements": measurements,
+            "tool": delegate.model.tool.rawValue, "dirty": delegate.model.isDirty,
+            "editing": delegate.model.isEditing, "drawing": delegate.model.isDrawing,
+            "controlsVisible": delegate.model.controlsVisible,
+            "pendingMosaicCount": delegate.model.pendingMosaicCount,
+            "panningCursor": delegate.model.canvas?.canvasCursor === NSCursor.closedHand,
+            "error": error.localizedDescription]
+        try? JSONSerialization.data(withJSONObject: state, options: [.prettyPrinted, .sortedKeys])
+            .write(to: output.appendingPathComponent("failure-state.json"))
         try? error.localizedDescription.write(to: output.appendingPathComponent("failure.txt"), atomically: true, encoding: .utf8)
         print("PICGLIDE_UI_SMOKE_FAIL \(error)")
     }

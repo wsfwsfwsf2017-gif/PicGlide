@@ -1,6 +1,11 @@
 import Foundation
 import CoreGraphics
 import ImageIO
+import Darwin
+
+public enum SavePolicy: Sendable {
+    case replaceExisting, createNew
+}
 
 public enum ImageFiles {
     public static func images(in directory: URL) throws -> [URL] {
@@ -13,8 +18,12 @@ public enum ImageFiles {
 
     @discardableResult
     public static func save(image: CGImage, format: ImageFormat, to url: URL,
-                            expected: FileFingerprint? = nil) throws -> FileFingerprint {
+                            expected: FileFingerprint? = nil, policy: SavePolicy = .replaceExisting) throws -> FileFingerprint {
         let manager = FileManager.default
+        if policy == .createNew {
+            var entry = stat()
+            if lstat(url.path, &entry) == 0 { throw AutomationError("output_exists", "输出路径已存在，请选择新文件。") }
+        }
         if let expected, try FileFingerprint.read(url) != expected { throw PicGlideError.externallyChanged }
         if manager.fileExists(atPath: url.path), !manager.isWritableFile(atPath: url.path) {
             throw PicGlideError.readOnly
@@ -32,7 +41,14 @@ public enum ImageFiles {
               validated.width == image.width, validated.height == image.height
         else { throw PicGlideError.encodingFailed }
         if let expected, try FileFingerprint.read(url) != expected { throw PicGlideError.externallyChanged }
-        if manager.fileExists(atPath: url.path) {
+        if policy == .createNew {
+            // Commit without a check/rename race, including dangling symlinks.
+            guard renamex_np(temporary.path, url.path, UInt32(RENAME_EXCL)) == 0 else {
+                let code = errno
+                if code == EEXIST { throw AutomationError("output_exists", "输出路径已存在，请选择新文件。") }
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+            }
+        } else if manager.fileExists(atPath: url.path) {
             _ = try manager.replaceItemAt(url, withItemAt: temporary)
         } else {
             try manager.moveItem(at: temporary, to: url)

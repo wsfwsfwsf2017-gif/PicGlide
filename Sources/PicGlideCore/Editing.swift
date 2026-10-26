@@ -34,6 +34,8 @@ public struct EditHistory: Sendable {
     public var operations: [EditOperation] { Array(entries.prefix(position)) }
     public var canUndo: Bool { position > 0 }
     public var canRedo: Bool { position < entries.count }
+    public var operationToUndo: EditOperation? { canUndo ? entries[position - 1] : nil }
+    public var operationToRedo: EditOperation? { canRedo ? entries[position] : nil }
     public var isDirty: Bool { operations != saved }
 
     public mutating func append(_ operation: EditOperation) {
@@ -87,10 +89,11 @@ public struct Viewport: Sendable {
                 y: (imagePoint.y - imageBounds.minY) * scale + imageRect.minY)
     }
 
-    public mutating func fit() {
+    public mutating func fit(inset: CGFloat = 0) {
         guard imageBounds.width > 0, imageBounds.height > 0,
               viewSize.width > 0, viewSize.height > 0 else { return }
-        scale = min(viewSize.width / imageBounds.width, viewSize.height / imageBounds.height)
+        scale = min(max(1, viewSize.width - inset * 2) / imageBounds.width,
+                    max(1, viewSize.height - inset * 2) / imageBounds.height)
         pan = .zero
     }
 
