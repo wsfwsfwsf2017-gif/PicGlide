@@ -337,14 +337,22 @@ final class ViewerModel {
         var format = saveFormat ?? .png
         if asCopy || saveFormat == nil {
             let panel = NSSavePanel()
-            let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 160, height: 28))
+            let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 160, height: 28), pullsDown: true)
+            popup.addItem(withTitle: "保存格式")
             popup.addItems(withTitles: ImageFormat.exportFormats.map(\.title))
+            popup.item(at: 0)?.title = ImageFormat.png.title
+            popup.selectItem(at: 1)
+            popup.item(at: 1)?.state = .on
+            popup.preferredEdge = .minY
             popup.setAccessibilityLabel("保存格式")
             let formatAction = SaveFormatAction(panel: panel)
             popup.target = formatAction; popup.action = #selector(SaveFormatAction.selectFormat(_:))
-            let label = NSTextField(labelWithString: "格式")
+            let label = NSTextField(labelWithString: "格式：")
+            label.alignment = .right
+            label.widthAnchor.constraint(equalToConstant: 44).isActive = true
             let accessory = NSStackView(views: [label, popup])
-            accessory.orientation = .horizontal; accessory.spacing = 8
+            accessory.orientation = .horizontal; accessory.spacing = 10
+            accessory.edgeInsets = NSEdgeInsets(top: 8, left: 40, bottom: 8, right: 20)
             panel.accessoryView = accessory
             panel.allowedContentTypes = [.png]
             panel.allowsOtherFileTypes = false
@@ -353,7 +361,7 @@ final class ViewerModel {
             let response = panel.runModal()
             withExtendedLifetime(formatAction) {}
             guard response == .OK, let selected = panel.url else { completion?(false); return }
-            format = ImageFormat.exportFormats[popup.indexOfSelectedItem]
+            format = ImageFormat.exportFormats[popup.indexOfSelectedItem - 1]
             destination = selected.deletingPathExtension().appendingPathExtension(format.fileExtension)
                 .standardizedFileURL.resolvingSymlinksInPath()
             // The save panel must confirm the actual path, including its extension.
@@ -444,7 +452,13 @@ private final class SaveFormatAction: NSObject {
     weak var panel: NSSavePanel?
     init(panel: NSSavePanel) { self.panel = panel }
     @objc func selectFormat(_ popup: NSPopUpButton) {
-        let format = ImageFormat.exportFormats[popup.indexOfSelectedItem]
+        let index = popup.indexOfSelectedItem - 1
+        guard ImageFormat.exportFormats.indices.contains(index) else { return }
+        let format = ImageFormat.exportFormats[index]
+        popup.item(at: 0)?.title = format.title
+        for (offset, item) in popup.itemArray.dropFirst().enumerated() {
+            item.state = offset == index ? .on : .off
+        }
         panel?.allowedContentTypes = [UTType(format.typeIdentifier)!]
         if let name = panel?.nameFieldStringValue {
             panel?.nameFieldStringValue = (name as NSString).deletingPathExtension + "." + format.fileExtension
