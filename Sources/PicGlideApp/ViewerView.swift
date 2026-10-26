@@ -119,24 +119,21 @@ struct ViewerView: View {
                 .buttonStyle(ClickableButtonStyle(help: model.isEditing ? "返回浏览（⌘E）" : "编辑（⌘E）"))
                 .disabled(model.isBusy || model.isDrawing || model.pendingMosaicCount > 0)
                 .accessibilityIdentifier("edit.toggle")
-                HStack(spacing: 0) {
-                    Button { model.save() } label: {
-                        Text("保存").font(.system(size: 13, weight: .medium)).frame(width: 52, height: 32)
-                    }
-                    .buttonStyle(ClickableButtonStyle(prominent: model.isDirty, help: model.saveHelp))
-                    .disabled(!model.canSave).accessibilityIdentifier("file.save")
-                    Menu {
-                        Button("另存为…（⇧⌘S）") { model.save(asCopy: true) }.disabled(!model.canSaveCopy)
-                        Divider()
-                        Button("还原到上次保存…", action: model.restoreEdits).disabled(!model.canRestore)
-                    } label: {
-                        Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold))
-                            .frame(width: 26, height: 32)
-                    }
-                    .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 26, height: 32)
-                    .background(CursorRegion(cursor: .pointingHand, help: "保存选项"))
-                    .disabled(model.isBusy).accessibilityLabel("保存选项").accessibilityIdentifier("file.saveOptions")
+                Button(action: model.restoreEdits) {
+                    Text("舍弃编辑").font(.system(size: 13, weight: .medium)).frame(width: 76, height: 32)
                 }
+                .buttonStyle(ClickableButtonStyle(help: model.restoreHelp))
+                .disabled(!model.canRestore).accessibilityLabel("舍弃编辑").accessibilityIdentifier("file.discard")
+                Button { model.save(asCopy: true) } label: {
+                    Text("另存为…").font(.system(size: 13, weight: .medium)).frame(width: 76, height: 32)
+                }
+                .buttonStyle(ClickableButtonStyle(help: model.canSaveCopy ? "另存为（⇧⌘S）" : model.saveHelp))
+                .disabled(!model.canSaveCopy).accessibilityLabel("另存为").accessibilityIdentifier("file.saveCopy")
+                Button { model.save() } label: {
+                    Text("保存").font(.system(size: 13, weight: .medium)).frame(width: 52, height: 32)
+                }
+                .buttonStyle(ClickableButtonStyle(prominent: model.isDirty, help: model.saveHelp))
+                .disabled(!model.canSave).accessibilityLabel("保存").accessibilityIdentifier("file.save")
             }
         }
         .frame(height: 40)

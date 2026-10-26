@@ -133,7 +133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         file.addItem(.separator())
         item(file, "保存", #selector(saveImage), "s")
         item(file, "另存为…", #selector(saveCopy), "s", shift: true)
-        item(file, "还原到上次保存…", #selector(restoreImage))
+        item(file, "舍弃编辑…", #selector(restoreImage))
         file.addItem(.separator())
         item(file, "关闭窗口", #selector(closeWindow), "w")
         let edit = menu("编辑")
@@ -164,7 +164,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         case #selector(saveImage): return model.canSave
         case #selector(saveCopy): return model.canSaveCopy
         case #selector(restoreImage): return model.canRestore
-        case #selector(toggleEdit): return model.frame != nil && !model.isBusy && model.pendingMosaicCount == 0
+        case #selector(toggleEdit):
+            menuItem.title = model.isEditing ? "返回浏览" : "编辑图片"
+            return model.frame != nil && !model.isBusy && !model.isDrawing && model.pendingMosaicCount == 0
         case #selector(fitImage), #selector(actualSize): return model.frame != nil && !model.isBusy
         case #selector(previousImage): return model.index > 0 && !model.isBusy
         case #selector(nextImage): return model.index + 1 < model.files.count && !model.isBusy

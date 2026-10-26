@@ -22,6 +22,27 @@ func runLayoutChecks(delegate: AppDelegate, output: URL) async {
         view.cacheDisplay(in: view.bounds, to: bitmap)
         try bitmap.representation(using: .png, properties: [:])!.write(to: output.appendingPathComponent(name + ".png"))
     }
+    func checkFileActions() {
+        let root = window.contentView!, bounds = window.contentView!.convert(window.contentView!.bounds, to: nil)
+        let actions = CursorRegionView.regions(in: root).filter {
+            let rect = $0.convert($0.cursorRect, to: nil)
+            return abs(rect.height - 32) < 0.1 && rect.minY >= bounds.maxY - 40
+        }.sorted { $0.convert(.zero, to: nil).x < $1.convert(.zero, to: nil).x }
+        precondition(actions.count == 4, "File actions are hidden or clipped")
+        let enabled = [!model.isBusy && !model.isDrawing && model.pendingMosaicCount == 0,
+                       model.canRestore, model.canSaveCopy, model.canSave]
+        var previousMaxX: CGFloat = 78
+        for (index, action) in actions.enumerated() {
+            let rect = action.convert(action.cursorRect, to: nil)
+            precondition(rect.minX >= previousMaxX && rect.maxX <= bounds.maxX - 19,
+                         "File actions overlap or leave the window")
+            precondition(action.cursor === (enabled[index] ? NSCursor.pointingHand : NSCursor.arrow),
+                         "File action disabled state is incorrect")
+            precondition(!window.isHeaderLocation(NSPoint(x: rect.midX, y: rect.midY)),
+                         "Window drag intercepts a file action")
+            previousMaxX = rect.maxX
+        }
+    }
     do {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         try capture("welcome")
@@ -56,6 +77,7 @@ func runLayoutChecks(delegate: AppDelegate, output: URL) async {
                 model.setZoom(actualSize: false)
                 try await Task.sleep(for: .milliseconds(180))
                 let prefix = "\(dark ? "dark" : "light")-\(sizeIndex)"
+                checkFileActions()
                 try capture(prefix + "-browse")
                 model.toggleEditing(); try await wait { model.isEditing && !model.isPreparingEdit }
                 for tool in EditTool.allCases {
@@ -75,8 +97,10 @@ func runLayoutChecks(delegate: AppDelegate, output: URL) async {
                     let toolbar = model.toolbarCursorRegion.map { canvas.convert($0.cursorRect, from: $0) } ?? .zero
                     let fits = canvas.bounds.insetBy(dx: -0.1, dy: -0.1).contains(imageRect)
                     let overlaps = imageRect.intersects(toolbar)
+                    checkFileActions()
                     records.append(["theme": dark ? "dark" : "light", "window": [size.width, size.height],
-                        "tool": tool.rawValue, "imageFitsCanvas": fits, "imageOverlapsToolbar": overlaps])
+                        "tool": tool.rawValue, "imageFitsCanvas": fits, "imageOverlapsToolbar": overlaps,
+                        "fileActionsVisible": true])
                     if ProcessInfo.processInfo.environment["PICGLIDE_LAYOUT_ASSERT"] == "1" {
                         precondition(fits && !overlaps, "Fit image is clipped or overlaps toolbar")
                     }

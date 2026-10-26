@@ -512,7 +512,11 @@ func runSmokeChecks(delegate: AppDelegate) async {
         let editButton = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == "编辑（⌘E）" }!
         let positionBeforeClick = canvas.convert(canvas.viewport.viewPoint(from: canvas.viewport.imageBounds.origin), to: nil)
         let scaleBeforeClick = canvas.viewport.scale
-        for region in cursorRegions(in: delegate.window.contentView!).filter({ ["编辑（⌘E）", "保存选项", model.saveHelp].contains($0.helpText) }) {
+        let fileActions = cursorRegions(in: delegate.window.contentView!).filter {
+            ["编辑（⌘E）", "另存为（⇧⌘S）", model.restoreHelp, model.saveHelp].contains($0.helpText)
+        }
+        guard fileActions.count == 4 else { fatalError("File actions are hidden in a menu") }
+        for region in fileActions {
             let point = region.convert(NSPoint(x: region.bounds.midX, y: region.bounds.midY), to: nil)
             guard !delegate.window.isHeaderLocation(point) else { fatalError("Header drag intercepts a file action") }
         }
@@ -831,19 +835,27 @@ func runSmokeChecks(delegate: AppDelegate) async {
         drag(canvas.viewport.viewPoint(from: CGPoint(x: 300, y: 250)),
              canvas.viewport.viewPoint(from: CGPoint(x: 900, y: 700)), canvas: canvas)
         let restoreOperations = model.history.operations, restoreCrop = model.pendingCrop
-        respondToAlert("取消"); model.restoreEdits()
+        let discardButton = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == "舍弃编辑" }!
+        try await hover(discardButton)
+        let discardCenter = discardButton.convert(NSPoint(x: discardButton.bounds.midX, y: discardButton.bounds.midY), to: nil)
+        let discardDialog = output.appendingPathComponent("unsaved-dialog.png")
+        try FileManager.default.removeItem(at: discardDialog)
+        respondToAlert("取消")
+        mouse(.leftMouseDown, at: discardCenter); mouse(.leftMouseUp, at: discardCenter)
+        try await wait { FileManager.default.fileExists(atPath: discardDialog.path) && NSApp.modalWindow == nil }
         guard model.history.operations == restoreOperations && model.pendingCrop == restoreCrop else {
             fatalError("Cancel restore loses edits or crop selection")
         }
-        respondToAlert("还原"); model.restoreEdits()
-        try await wait { model.frameRevision == model.editRevision }
+        respondToAlert("舍弃编辑")
+        mouse(.leftMouseDown, at: discardCenter); mouse(.leftMouseUp, at: discardCenter)
+        try await wait { !model.isDirty && model.frameRevision == model.editRevision }
         canvas.update()
         guard model.history.operations == savedOperations, !model.isDirty, !model.canRestore, !model.history.canRedo,
               model.pendingCrop == nil, model.tool == .hand, model.isEditing,
               canvas.viewport.scale == savedScale, canvas.viewport.viewPoint(from: savedBounds.origin) == savedPosition,
               try Data(contentsOf: fixture) == savedFile else { fatalError("Restore does not preserve saved edits, viewport, or file") }
         try capture("editor-restored")
-        checks.append("Restore confirmation cancel preserves edits; confirm restores saved checkpoint without saving or leaving editing")
+        checks.append("Direct discard button: cancel preserves edits; confirm restores saved checkpoint without saving or leaving editing")
         model.commit(.rectangle(CGRect(x: 300, y: 300, width: 100, height: 100), ink: model.ink, width: 3))
         respondToAlert("放弃")
         model.navigate(1)

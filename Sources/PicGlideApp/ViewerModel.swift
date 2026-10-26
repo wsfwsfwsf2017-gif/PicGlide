@@ -79,7 +79,7 @@ final class ViewerModel {
     var redoTitle: String { history.operationToRedo.map { "重做" + $0.title } ?? "重做" }
     var restoreHelp: String {
         if isBusy { return "处理中" }
-        return canRestore ? "恢复" : "没有修改"
+        return canRestore ? "舍弃编辑" : "没有修改"
     }
     var saveHelp: String {
         if isBusy || pendingMosaicCount > 0 { return "处理中" }
@@ -248,10 +248,10 @@ final class ViewerModel {
     func restoreEdits() {
         guard canRestore else { return }
         let alert = NSAlert()
-        alert.messageText = "放弃未保存的修改？"
+        alert.messageText = "舍弃未保存的编辑？"
         alert.informativeText = "图片将恢复到最近一次保存的状态。已保存的内容会保留，放弃的修改无法撤销。"
         alert.addButton(withTitle: "取消").keyEquivalent = "\r"
-        alert.addButton(withTitle: "还原").hasDestructiveAction = true
+        alert.addButton(withTitle: "舍弃编辑").hasDestructiveAction = true
         guard alert.runModal() == .alertSecondButtonReturn else { return }
         canvas?.cancelPendingMosaics()
         history.restoreSaved(); editRevision += 1
