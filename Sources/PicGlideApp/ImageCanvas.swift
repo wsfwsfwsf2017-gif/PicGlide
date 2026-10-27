@@ -309,22 +309,22 @@ final class CanvasView: NSView {
         let controls = cropControls!
         controls.isHidden = dragStart != nil || model.isBusy
         let area = visibleRect.intersection(bounds).insetBy(dx: 8, dy: 8)
-        let controlWidth: CGFloat = 248
-        guard area.width >= controlWidth, area.height >= 48 else { controls.isHidden = true; return }
+        let controlWidth = CropControls.size.width, controlHeight = CropControls.size.height
+        guard area.width >= controlWidth, area.height >= controlHeight else { controls.isHidden = true; return }
         let first = viewport.viewPoint(from: rect.origin)
         let selected = CGRect(x: first.x, y: first.y, width: rect.width * viewport.scale, height: rect.height * viewport.scale)
         let toolbar = model.toolbarCursorRegion.map { convert($0.cursorRect, from: $0).insetBy(dx: -10, dy: -10) } ?? .zero
         let origins = [
             CGPoint(x: selected.maxX - controlWidth, y: selected.maxY + 12),
-            CGPoint(x: selected.maxX - controlWidth, y: selected.minY - 60),
+            CGPoint(x: selected.maxX - controlWidth, y: selected.minY - controlHeight - 12),
             CGPoint(x: selected.maxX - controlWidth - 12, y: selected.minY + 12),
-            CGPoint(x: selected.maxX - controlWidth, y: area.maxY - 48)
+            CGPoint(x: selected.maxX - controlWidth, y: area.maxY - controlHeight)
         ]
         let candidates = origins.map { point in
             CGRect(x: min(area.maxX - controlWidth, max(area.minX, point.x)),
-                   y: min(area.maxY - 48, max(area.minY, point.y)), width: controlWidth, height: 48)
+                   y: min(area.maxY - controlHeight, max(area.minY, point.y)), width: controlWidth, height: controlHeight)
         }
-        let fitting = origins.map { CGRect(origin: $0, size: NSSize(width: controlWidth, height: 48)) }
+        let fitting = origins.map { CGRect(origin: $0, size: CropControls.size) }
             .first { area.contains($0) && !$0.intersects(toolbar) }
         controls.frame = fitting ?? candidates.first(where: { !$0.intersects(toolbar) }) ?? candidates.last!
         window?.invalidateCursorRects(for: self)

@@ -450,7 +450,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try await hover(canvas)
         try await checkHeaderFill("Image window header fills desktop and restores frame")
         try await checkToolbarCursor(canvas, label: "Viewer native mouse: clickable hand, disabled/background arrow, canvas hand")
-        let editTip = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == "编辑（⌘E）" }!
+        let editTip = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == "展开编辑工具（⌘E）" }!
         try await checkTooltip(editTip, name: "tooltip-edit")
         let disabledSaveTip = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == model.saveHelp }!
         guard disabledSaveTip.cursor === NSCursor.arrow else { fatalError("Clean save cursor is not arrow") }
@@ -509,11 +509,11 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try await wait { !model.isLoading && model.currentURL == fixture }
         model.setZoom(actualSize: false)
         canvas.update()
-        let editButton = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == "编辑（⌘E）" }!
+        let editButton = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == "展开编辑工具（⌘E）" }!
         let positionBeforeClick = canvas.convert(canvas.viewport.viewPoint(from: canvas.viewport.imageBounds.origin), to: nil)
         let scaleBeforeClick = canvas.viewport.scale
         let fileActions = cursorRegions(in: delegate.window.contentView!).filter {
-            ["编辑（⌘E）", "另存为（⇧⌘S）", model.restoreHelp, model.saveHelp].contains($0.helpText)
+            ["展开编辑工具（⌘E）", "另存为（⇧⌘S）", model.restoreHelp, model.saveHelp].contains($0.helpText)
         }
         guard fileActions.count == 4 else { fatalError("File actions are hidden in a menu") }
         for region in fileActions {
@@ -608,11 +608,15 @@ func runSmokeChecks(delegate: AppDelegate) async {
         checks.append("Native unsaved-dialog cancel preserves edits")
         let editedOperations = model.history.operations
         let fileBeforeExit = try Data(contentsOf: fixture)
-        model.toggleEditing()
+        let hideTools = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == "收起编辑工具（⌘E）" }!
+        try await hover(hideTools)
+        let hidePoint = hideTools.convert(NSPoint(x: hideTools.bounds.midX, y: hideTools.bounds.midY), to: nil)
+        mouse(.leftMouseDown, at: hidePoint); mouse(.leftMouseUp, at: hidePoint)
+        try await wait { !model.isEditing }
         try await Task.sleep(for: .milliseconds(150))
         guard !model.isEditing, model.isDirty, model.canSave,
               model.history.operations == editedOperations,
-              try Data(contentsOf: fixture) == fileBeforeExit else { fatalError("Return to browse lost or saved edits") }
+              try Data(contentsOf: fixture) == fileBeforeExit else { fatalError("Hiding tools lost or saved edits") }
         delegate.window.makeFirstResponder(canvas)
         model.toolbarHovered = false; model.revealControls()
         try await wait { !model.controlsVisible }
@@ -633,7 +637,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
         checks.append("Edge button triggers unsaved prompt and cancel preserves edits and file")
         model.toggleEditing(); model.chooseTool(.pencil); canvas.update()
         try await Task.sleep(for: .milliseconds(250))
-        checks.append("Return to browse preserves unsaved edits without writing file")
+        checks.append("Native edit toggle hides tools and preserves unsaved edits without writing file")
         model.chooseTool(.rectangle); canvas.update()
         drag(canvas.viewport.viewPoint(from: CGPoint(x: 900, y: 320)),
              canvas.viewport.viewPoint(from: CGPoint(x: 1450, y: 850)), canvas: canvas)
@@ -727,6 +731,30 @@ func runSmokeChecks(delegate: AppDelegate) async {
         model.pendingCrop = pending; canvas.update()
         let beforeBlockedSave = try Data(contentsOf: fixture)
         guard pending != nil, !model.canSave, !model.canSaveCopy else { fatalError("Pending crop did not disable save") }
+        try await Task.sleep(for: .milliseconds(150))
+        let root = delegate.window.contentView!, rootBounds = root.convert(root.bounds, to: nil)
+        let lockedEdit = cursorRegions(in: root).first {
+            $0.helpText == "先确认裁剪" && abs($0.cursorRect.width - 76) < 0.5 &&
+                $0.convert($0.cursorRect, to: nil).minY >= rootBounds.maxY - 40
+        }!
+        guard lockedEdit.cursor === NSCursor.arrow else { fatalError("Pending crop edit toggle is clickable") }
+        try await hover(lockedEdit)
+        let lockedPoint = lockedEdit.convert(NSPoint(x: lockedEdit.bounds.midX, y: lockedEdit.bounds.midY), to: nil)
+        mouse(.leftMouseDown, at: lockedPoint); mouse(.leftMouseUp, at: lockedPoint)
+        let lockedTools = cursorRegions(in: root).filter {
+            $0.helpText == "先确认裁剪" && abs($0.cursorRect.width - 32) < 0.5
+        }.sorted { $0.convert(.zero, to: nil).x < $1.convert(.zero, to: nil).x }
+        guard lockedTools.count == 7 else { fatalError("Pending crop leaves tool or history buttons enabled") }
+        try await hover(lockedTools[4])
+        let toolPoint = lockedTools[4].convert(NSPoint(x: 16, y: 16), to: nil)
+        mouse(.leftMouseDown, at: toolPoint); mouse(.leftMouseUp, at: toolPoint)
+        try await Task.sleep(for: .milliseconds(100))
+        model.undo(); model.redo(); key(124, canvas: canvas)
+        guard model.pendingCrop == pending, model.tool == .crop, model.isEditing,
+              model.history.operations == beforeCropHistory, model.currentURL == fixture else {
+            fatalError("Pending crop is silently discarded by tool, edit toggle, history, or navigation")
+        }
+        checks.append("Pending crop blocks native tool and edit-toggle clicks, history, and keyboard navigation without losing selection")
         for (action, asCopy) in [(#selector(AppDelegate.saveImage), false), (#selector(AppDelegate.saveCopy), true)] {
             let entry = NSMenuItem(title: "保存", action: action, keyEquivalent: "s")
             guard !delegate.validateMenuItem(entry) else { fatalError("Menu save enabled with pending crop") }
@@ -743,7 +771,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
         drag(canvas.viewport.viewPoint(from: CGPoint(x: 150, y: 100)),
              canvas.viewport.viewPoint(from: CGPoint(x: 1600, y: 1050)), canvas: canvas)
         try await Task.sleep(for: .milliseconds(150))
-        let floatingCancel = cursorRegions(in: canvas.cropControls!).first { $0.helpText == "取消（Esc）" }!
+        let floatingCancel = cursorRegions(in: canvas.cropControls!).first { $0.helpText == "取消裁剪（Esc）" }!
         let panBeforeCancel = canvas.viewport.pan
         let cancelPoint = floatingCancel.convert(NSPoint(x: floatingCancel.bounds.midX, y: floatingCancel.bounds.midY), to: nil)
         mouse(.leftMouseDown, at: cancelPoint); mouse(.leftMouseUp, at: cancelPoint)
@@ -756,7 +784,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
         drag(canvas.viewport.viewPoint(from: CGPoint(x: 150, y: 100)),
              canvas.viewport.viewPoint(from: CGPoint(x: 1600, y: 1050)), canvas: canvas)
         try await Task.sleep(for: .milliseconds(150))
-        let floatingApply = cursorRegions(in: canvas.cropControls!).first { $0.helpText == "应用（Enter）" }!
+        let floatingApply = cursorRegions(in: canvas.cropControls!).first { $0.helpText == "裁剪（Enter）" }!
         try await checkTooltip(floatingApply, name: "tooltip-crop-apply")
         let beforeFloatingClickPan = canvas.viewport.pan
         let cropOriginPosition = canvas.viewport.viewPoint(from: model.pendingCrop!.origin)
@@ -824,7 +852,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
         checks.append("Native fullscreen")
         model.save()
         try await wait { !model.isSaving && !model.isDirty }
-        guard try ImageMetadata.read(fixture).pixelSize == CGSize(width: 1450, height: 950) else { fatalError("Save mismatch") }
+        guard model.isEditing, try ImageMetadata.read(fixture).pixelSize == CGSize(width: 1450, height: 950) else { fatalError("Save mismatch or closes editing tools") }
         checks.append("UI overwrite save and pixel dimensions")
         let savedOperations = model.history.operations, savedFile = try Data(contentsOf: fixture)
         let savedBounds = model.frame!.bounds, savedScale = canvas.viewport.scale
@@ -836,7 +864,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
         drag(canvas.viewport.viewPoint(from: CGPoint(x: 300, y: 250)),
              canvas.viewport.viewPoint(from: CGPoint(x: 900, y: 700)), canvas: canvas)
         let restoreOperations = model.history.operations, restoreCrop = model.pendingCrop
-        let discardButton = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == "舍弃编辑" }!
+        let discardButton = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == "舍弃修改" }!
         try await hover(discardButton)
         let discardCenter = discardButton.convert(NSPoint(x: discardButton.bounds.midX, y: discardButton.bounds.midY), to: nil)
         measurements["discardButton"] = ["frame": NSStringFromRect(discardButton.convert(discardButton.bounds, to: nil)),
@@ -849,7 +877,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
         guard model.history.operations == restoreOperations && model.pendingCrop == restoreCrop else {
             fatalError("Cancel restore loses edits or crop selection")
         }
-        respondToAlert("舍弃编辑")
+        respondToAlert("舍弃修改")
         mouse(.leftMouseDown, at: discardCenter); mouse(.leftMouseUp, at: discardCenter)
         try await wait { !model.isDirty && model.frameRevision == model.editRevision }
         canvas.update()
@@ -860,7 +888,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try capture("editor-restored")
         checks.append("Direct discard button: cancel preserves edits; confirm restores saved checkpoint without saving or leaving editing")
         model.commit(.rectangle(CGRect(x: 300, y: 300, width: 100, height: 100), ink: model.ink, width: 3))
-        respondToAlert("放弃")
+        respondToAlert("不保存")
         model.navigate(1)
         try await wait { !model.isLoading && model.currentURL != fixture }
         checks.append("Native unsaved-dialog discard navigates")

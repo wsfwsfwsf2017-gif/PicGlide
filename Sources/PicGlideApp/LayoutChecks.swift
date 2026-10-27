@@ -22,6 +22,22 @@ func runLayoutChecks(delegate: AppDelegate, output: URL) async {
         view.cacheDisplay(in: view.bounds, to: bitmap)
         try bitmap.representation(using: .png, properties: [:])!.write(to: output.appendingPathComponent(name + ".png"))
     }
+    func respondToAlert(_ title: String) {
+        let timer = Timer(timeInterval: 0.15, repeats: false) { _ in
+            MainActor.assumeIsolated {
+                @MainActor func findButton(in view: NSView) -> NSButton? {
+                    if let button = view as? NSButton, button.title == title { return button }
+                    return view.subviews.compactMap(findButton).first
+                }
+                guard let view = NSApp.modalWindow?.contentView, let button = findButton(in: view) else {
+                    preconditionFailure("Expected confirmation button: \(title)")
+                }
+                button.performClick(nil)
+                try? title.write(to: output.appendingPathComponent("dialog-response.txt"), atomically: true, encoding: .utf8)
+            }
+        }
+        RunLoop.main.add(timer, forMode: .modalPanel)
+    }
     func checkFileActions() {
         let root = window.contentView!, bounds = window.contentView!.convert(window.contentView!.bounds, to: nil)
         let actions = CursorRegionView.regions(in: root).filter {
@@ -29,7 +45,7 @@ func runLayoutChecks(delegate: AppDelegate, output: URL) async {
             return abs(rect.height - 32) < 0.1 && rect.minY >= bounds.maxY - 40
         }.sorted { $0.convert(.zero, to: nil).x < $1.convert(.zero, to: nil).x }
         precondition(actions.count == 4, "File actions are hidden or clipped")
-        let enabled = [!model.isBusy && !model.isDrawing && model.pendingMosaicCount == 0,
+        let enabled = [model.canToggleEditing,
                        model.canRestore, model.canSaveCopy, model.canSave]
         var previousMaxX: CGFloat = 78
         for (index, action) in actions.enumerated() {
@@ -64,6 +80,119 @@ func runLayoutChecks(delegate: AppDelegate, output: URL) async {
             try bitmap.representation(using: .png, properties: [:])!.write(to: fixture)
         }
         model.requestOpen(fixture)
+        try await wait { model.frame != nil && !model.isLoading }
+        model.toggleEditing(); try await wait { model.isEditing && !model.isPreparingEdit }
+        let originalFile = try Data(contentsOf: fixture)
+        model.commit(.rectangle(CGRect(x: 50, y: 60, width: 100, height: 80), ink: model.ink, width: 4))
+        model.commit(.rectangle(CGRect(x: 200, y: 200, width: 80, height: 70), ink: model.ink, width: 3))
+        model.undo(); try await wait { model.frameRevision == model.editRevision }
+        precondition(model.canUndo && model.canRedo)
+        let previousEdits = model.history.operations
+        model.chooseTool(.crop)
+        let pending = model.frame!.bounds.insetBy(dx: 20, dy: 20)
+        model.pendingCrop = pending
+        model.chooseTool(.pencil)
+        precondition(model.pendingCrop == pending && model.tool == .crop,
+                     "Switching tools silently discards an unconfirmed crop")
+        model.toggleEditing()
+        precondition(model.pendingCrop == pending && model.isEditing,
+                     "Hiding editing tools silently discards an unconfirmed crop")
+        model.undo(); model.redo(); model.navigate(1)
+        precondition(model.history.operations == previousEdits && model.pendingCrop == pending &&
+                     !model.canUndo && !model.canRedo && !model.canNavigate && !model.canToggleEditing &&
+                     !model.canChooseTool && !model.canSave && !model.canSaveCopy && model.canRestore,
+                     "Pending crop permits a destructive state transition")
+        for action in [#selector(AppDelegate.toggleEdit), #selector(AppDelegate.undoEdit), #selector(AppDelegate.redoEdit),
+                       #selector(AppDelegate.saveImage), #selector(AppDelegate.saveCopy),
+                       #selector(AppDelegate.previousImage), #selector(AppDelegate.nextImage)] {
+            precondition(!delegate.validateMenuItem(NSMenuItem(title: "检查", action: action, keyEquivalent: "")))
+        }
+        try await Task.sleep(for: .milliseconds(100)); checkFileActions()
+        respondToAlert("继续编辑")
+        precondition(!delegate.windowShouldClose(window))
+        respondToAlert("继续编辑")
+        model.requestOpen(fixture, fillWindow: false)
+        let fileAfterCanceledLeave = try Data(contentsOf: fixture)
+        precondition(model.pendingCrop == pending && model.history.operations == previousEdits &&
+                     fileAfterCanceledLeave == originalFile)
+        records.append(["scenario": "pending crop blocks tool, history, navigation, save and hide; canceled close and external open preserve edits"])
+
+        model.cancelCrop()
+        precondition(model.pendingCrop == nil && model.tool == .hand && model.isEditing &&
+                     model.history.operations == previousEdits && model.canUndo && model.canRedo)
+        model.save(); try await wait { !model.isSaving && !model.isDirty }
+        precondition(model.isEditing && model.history.operations == previousEdits)
+        let savedFile = try Data(contentsOf: fixture)
+        let editMenu = NSMenuItem(title: "编辑", action: #selector(AppDelegate.toggleEdit), keyEquivalent: "e")
+        precondition(delegate.validateMenuItem(editMenu) && editMenu.state == .on && editMenu.title == "收起编辑工具")
+        records.append(["scenario": "cancel crop preserves committed edits; save keeps editing tools open"])
+
+        model.commit(.rectangle(CGRect(x: 400, y: 200, width: 100, height: 90), ink: model.ink, width: 3))
+        try await wait { model.frameRevision == model.editRevision }
+        let unsavedEdits = model.history.operations
+        model.toggleEditing()
+        let fileAfterHidingTools = try Data(contentsOf: fixture)
+        precondition(!model.isEditing && model.isDirty && model.history.operations == unsavedEdits &&
+                     fileAfterHidingTools == savedFile)
+        respondToAlert("取消"); model.restoreEdits()
+        precondition(model.history.operations == unsavedEdits && !model.isEditing)
+        respondToAlert("舍弃修改"); model.restoreEdits()
+        try await wait { model.frameRevision == model.editRevision }
+        let fileAfterDiscard = try Data(contentsOf: fixture)
+        precondition(!model.isEditing && !model.isDirty && model.history.operations == previousEdits &&
+                     !model.history.canRedo && fileAfterDiscard == savedFile)
+        precondition(delegate.validateMenuItem(editMenu) && editMenu.state == .off && editMenu.title == "展开编辑工具")
+        records.append(["scenario": "hiding tools never saves; discard cancel and saved checkpoint restore preserve browsing mode"])
+
+        model.toggleEditing(); try await wait { model.isEditing && !model.isPreparingEdit }
+        model.chooseTool(.crop); model.pendingCrop = pending
+        precondition(!model.isDirty && model.needsLeaveConfirmation)
+        respondToAlert("继续编辑")
+        precondition(!delegate.windowShouldClose(window))
+        let responseFile = output.appendingPathComponent("dialog-response.txt")
+        try FileManager.default.removeItem(at: responseFile)
+        respondToAlert("继续编辑")
+        precondition(delegate.applicationShouldTerminate(NSApp) == .terminateCancel)
+        try await wait { FileManager.default.fileExists(atPath: responseFile.path) && NSApp.modalWindow == nil }
+        precondition(model.pendingCrop == pending && !model.isDirty && model.isEditing)
+        records.append(["scenario": "crop-only document requires close and quit confirmation"])
+
+        model.applyCrop(); try await wait { model.frameRevision == model.editRevision }
+        let fileAfterCrop = try Data(contentsOf: fixture)
+        precondition(model.tool == .hand && model.isEditing && model.isDirty &&
+                     model.history.operations.count == previousEdits.count + 1 && model.frame?.bounds == pending &&
+                     fileAfterCrop == savedFile)
+        model.undo(); try await wait { model.frameRevision == model.editRevision }
+        precondition(!model.isDirty && model.history.operations == previousEdits)
+        records.append(["scenario": "crop commits one undoable operation without saving"])
+
+        model.chooseTool(.crop); model.pendingCrop = pending
+        respondToAlert("舍弃修改并继续")
+        model.requestOpen(fixture, fillWindow: false)
+        try await wait { model.frame != nil && !model.isLoading }
+        let fileAfterOpening = try Data(contentsOf: fixture)
+        precondition(model.pendingCrop == nil && !model.isDirty && !model.isEditing &&
+                     fileAfterOpening == savedFile)
+        records.append(["scenario": "explicitly discarding crop allows external open without writing the file"])
+
+        let failureFixture = output.appendingPathComponent("save-failure-fixture.png")
+        try savedFile.write(to: failureFixture)
+        model.requestOpen(failureFixture, fillWindow: false)
+        try await wait { model.frame != nil && !model.isLoading }
+        model.toggleEditing(); try await wait { model.isEditing && !model.isPreparingEdit }
+        model.commit(.rectangle(CGRect(x: 400, y: 200, width: 90, height: 80), ink: model.ink, width: 3))
+        try await wait { model.frameRevision == model.editRevision }
+        let failedEdits = model.history.operations
+        let changedFile = savedFile + Data([0])
+        try changedFile.write(to: failureFixture, options: .atomic)
+        var saveFailed = false
+        respondToAlert("好")
+        model.save { saveFailed = !$0 }
+        try await wait { saveFailed && !model.isSaving }
+        let fileAfterFailure = try Data(contentsOf: failureFixture)
+        precondition(model.isEditing && model.isDirty && model.history.operations == failedEdits && fileAfterFailure == changedFile)
+        records.append(["scenario": "failed save preserves unsaved edits and externally changed file"])
+        respondToAlert("不保存"); model.requestOpen(fixture, fillWindow: false)
         try await wait { model.frame != nil && !model.isLoading }
         let screen = window.screen!
         let sizes = [NSSize(width: 620, height: 440), NSSize(width: 1100, height: 760), screen.visibleFrame.size]

@@ -68,8 +68,12 @@ final class ViewerModel {
     var index: Int { currentURL.flatMap { files.firstIndex(of: $0) } ?? 0 }
     var isDirty: Bool { history.isDirty }
     var isBusy: Bool { isSaving || isPreparingEdit }
-    var canUndo: Bool { history.canUndo && !isBusy && pendingMosaicCount == 0 }
-    var canRedo: Bool { history.canRedo && !isBusy && pendingMosaicCount == 0 }
+    var needsLeaveConfirmation: Bool { isDirty || pendingCrop != nil }
+    var canToggleEditing: Bool { frame != nil && !isBusy && !isDrawing && pendingMosaicCount == 0 && pendingCrop == nil }
+    var canChooseTool: Bool { !isBusy && pendingCrop == nil }
+    var canNavigate: Bool { !isBusy && !isDrawing && pendingMosaicCount == 0 && pendingCrop == nil }
+    var canUndo: Bool { history.canUndo && !isBusy && pendingMosaicCount == 0 && pendingCrop == nil }
+    var canRedo: Bool { history.canRedo && !isBusy && pendingMosaicCount == 0 && pendingCrop == nil }
     var canSave: Bool { isDirty && !isBusy && !isDrawing && pendingMosaicCount == 0 && pendingCrop == nil }
     var canSaveCopy: Bool { frame != nil && !isBusy && !isDrawing && pendingMosaicCount == 0 && pendingCrop == nil }
     var canRestore: Bool { frame != nil && !isBusy && (isDirty || pendingCrop != nil || isDrawing || pendingMosaicCount > 0) }
@@ -79,7 +83,13 @@ final class ViewerModel {
     var redoTitle: String { history.operationToRedo.map { "重做" + $0.title } ?? "重做" }
     var restoreHelp: String {
         if isBusy { return "处理中" }
-        return canRestore ? "舍弃编辑" : "没有修改"
+        return canRestore ? "舍弃修改" : "没有修改"
+    }
+    var editHelp: String {
+        if isBusy || pendingMosaicCount > 0 { return "处理中" }
+        if pendingCrop != nil { return "先确认裁剪" }
+        if isDrawing { return "绘制中" }
+        return isEditing ? "收起编辑工具（⌘E）" : "展开编辑工具（⌘E）"
     }
     var saveHelp: String {
         if isBusy || pendingMosaicCount > 0 { return "处理中" }
@@ -115,7 +125,7 @@ final class ViewerModel {
     }
 
     func navigate(_ offset: Int) {
-        guard !files.isEmpty, !isBusy else { return }
+        guard !files.isEmpty, canNavigate else { return }
         let next = index + offset
         guard files.indices.contains(next) else { revealControls(); return }
         requestOpen(files[next], fillWindow: false)
@@ -167,9 +177,9 @@ final class ViewerModel {
     }
 
     func toggleEditing() {
-        guard frame != nil, !isBusy, pendingMosaicCount == 0 else { return }
+        guard canToggleEditing else { return }
         if isEditing {
-            isEditing = false; tool = .hand; pendingCrop = nil; cancelGestureID = UUID()
+            isEditing = false; tool = .hand; cancelGestureID = UUID()
             revealControls(); return
         }
         if source != nil { isEditing = true; revealControls(); return }
@@ -198,8 +208,8 @@ final class ViewerModel {
     }
 
     func chooseTool(_ next: EditTool) {
-        guard !isBusy else { return }
-        tool = next; pendingCrop = nil; cancelGestureID = UUID(); revealControls()
+        guard canChooseTool else { return }
+        tool = next; cancelGestureID = UUID(); revealControls()
     }
 
     @discardableResult
@@ -222,12 +232,15 @@ final class ViewerModel {
     }
 
     func applyCrop() {
-        guard !isDrawing, pendingMosaicCount == 0, let rect = pendingCrop, rect.width >= 1, rect.height >= 1 else { return }
+        guard !isBusy, !isDrawing, pendingMosaicCount == 0, let rect = pendingCrop, rect.width >= 1, rect.height >= 1 else { return }
         commit(.crop(rect.integral))
         chooseTool(.hand)
     }
 
-    func cancelCrop() { chooseTool(.hand) }
+    func cancelCrop() {
+        guard !isBusy else { return }
+        pendingCrop = nil; chooseTool(.hand)
+    }
 
     func undo() {
         guard canUndo else { return }
@@ -248,14 +261,15 @@ final class ViewerModel {
     func restoreEdits() {
         guard canRestore else { return }
         let alert = NSAlert()
-        alert.messageText = "舍弃未保存的编辑？"
+        alert.messageText = "舍弃未保存的修改？"
         alert.informativeText = "图片将恢复到最近一次保存的状态。已保存的内容会保留，放弃的修改无法撤销。"
         alert.addButton(withTitle: "取消").keyEquivalent = "\r"
-        alert.addButton(withTitle: "舍弃编辑").hasDestructiveAction = true
+        alert.addButton(withTitle: "舍弃修改").hasDestructiveAction = true
         guard alert.runModal() == .alertSecondButtonReturn else { return }
         canvas?.cancelPendingMosaics()
         history.restoreSaved(); editRevision += 1
         savedFeedback = false
+        pendingCrop = nil
         chooseTool(.hand)
         window?.isDocumentEdited = false
         renderPreview(dimension: requestedDimension)
@@ -324,8 +338,8 @@ final class ViewerModel {
         guard !isBusy, let url = currentURL, let metadata else { completion?(false); return }
         guard pendingCrop == nil && !isDrawing && pendingMosaicCount == 0 else {
             let alert = NSAlert()
-            alert.messageText = pendingMosaicCount > 0 ? "正在处理马赛克" : pendingCrop != nil ? "先应用或取消裁剪" : "先结束当前绘制"
-            alert.informativeText = pendingMosaicCount > 0 ? "处理完成后即可保存，或按 Esc 取消未完成的笔迹。" : pendingCrop != nil ? "当前裁剪选区尚未应用，确认裁剪后再保存图片。" : "松开鼠标完成绘制，或按 Esc 取消后再保存。"
+            alert.messageText = pendingMosaicCount > 0 ? "正在处理马赛克" : pendingCrop != nil ? "先确认裁剪" : "先结束当前绘制"
+            alert.informativeText = pendingMosaicCount > 0 ? "处理完成后即可保存，或按 Esc 取消未完成的笔迹。" : pendingCrop != nil ? "点击“裁剪”完成操作，或取消裁剪后再保存。" : "松开鼠标完成绘制，或按 Esc 取消后再保存。"
             alert.addButton(withTitle: "好")
             alert.runModal(); completion?(false); return
         }
@@ -421,11 +435,19 @@ final class ViewerModel {
 
     func confirmLeaving(_ action: @escaping @MainActor () -> Void) {
         guard !isBusy, pendingMosaicCount == 0 else { NSSound.beep(); return }
-        guard isDirty else { action(); return }
+        guard needsLeaveConfirmation else { action(); return }
         let alert = NSAlert()
+        if pendingCrop != nil {
+            alert.messageText = "裁剪尚未确认"
+            alert.informativeText = "继续编辑可完成或取消裁剪。舍弃后将放弃当前图片的全部未保存修改，包括裁剪选区；文件不会被保存。"
+            alert.addButton(withTitle: "继续编辑").keyEquivalent = "\r"
+            alert.addButton(withTitle: "舍弃修改并继续").hasDestructiveAction = true
+            if alert.runModal() == .alertSecondButtonReturn { action() }
+            return
+        }
         alert.messageText = "保存对图片的修改？"
         alert.informativeText = currentURL?.lastPathComponent ?? "当前图片"
-        alert.addButton(withTitle: "保存"); alert.addButton(withTitle: "放弃"); alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: "保存"); alert.addButton(withTitle: "不保存"); alert.addButton(withTitle: "取消")
         switch alert.runModal() {
         case .alertFirstButtonReturn: save { success in if success { action() } }
         case .alertSecondButtonReturn: action()
