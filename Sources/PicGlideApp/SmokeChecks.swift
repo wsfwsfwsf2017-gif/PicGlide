@@ -176,7 +176,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
             throw NSError(domain: "PicGlideSmoke", code: 5, userInfo: [NSLocalizedDescriptionKey:
                 "Button hover is not pointing hand: arrow=\(NSCursor.current === NSCursor.arrow), active=\(NSApp.isActive), key=\(delegate.window.isKeyWindow), frame=\(button.convert(button.bounds, to: nil)), mouse=\(delegate.window.mouseLocationOutsideOfEventStream), toolbar=\(toolbar.convert(toolbar.cursorRect, to: nil)), selected=\(CursorRegionView.cursor(at: delegate.window.mouseLocationOutsideOfEventStream, in: delegate.window.contentView!) === NSCursor.pointingHand)"])
         }
-        if let disabled = regions.first(where: { $0 !== toolbar && $0.cursor === NSCursor.arrow && !$0.cursorRect.isEmpty }) {
+        if let disabled = regions.first(where: { $0.cursor === NSCursor.arrow && !$0.helpText.isEmpty && !$0.cursorRect.isEmpty }) {
             try await hover(disabled)
             guard NSCursor.current === NSCursor.arrow else { fatalError("Disabled button hover is not arrow") }
         }
@@ -820,6 +820,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
         checks.append("Auto fill and header double-click leave native fullscreen unchanged")
         delegate.window.toggleFullScreen(nil)
         try await wait { !delegate.window.styleMask.contains(.fullScreen) }
+        try await Task.sleep(for: .milliseconds(600))
         checks.append("Native fullscreen")
         model.save()
         try await wait { !model.isSaving && !model.isDirty }
@@ -838,6 +839,8 @@ func runSmokeChecks(delegate: AppDelegate) async {
         let discardButton = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == "舍弃编辑" }!
         try await hover(discardButton)
         let discardCenter = discardButton.convert(NSPoint(x: discardButton.bounds.midX, y: discardButton.bounds.midY), to: nil)
+        measurements["discardButton"] = ["frame": NSStringFromRect(discardButton.convert(discardButton.bounds, to: nil)),
+            "headerDragExcluded": !delegate.window.isHeaderLocation(discardCenter), "enabled": model.canRestore]
         let discardDialog = output.appendingPathComponent("unsaved-dialog.png")
         try FileManager.default.removeItem(at: discardDialog)
         respondToAlert("取消")
@@ -965,6 +968,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
         print("PICGLIDE_UI_SMOKE_PASS \(checks.count) checks")
         passed = true
     } catch {
+        try? capture("failure")
         let state: [String: Any] = ["checks": checks, "measurements": measurements,
             "tool": delegate.model.tool.rawValue, "dirty": delegate.model.isDirty,
             "editing": delegate.model.isEditing, "drawing": delegate.model.isDrawing,
