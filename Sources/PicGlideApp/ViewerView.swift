@@ -265,9 +265,9 @@ struct CropControls: View {
         HStack(spacing: 4) {
             if let crop = model.pendingCrop {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("待确认裁剪").font(.system(size: 11))
+                    Text("待确认裁剪").font(.system(size: 12, weight: .medium))
                     Text("\(Int(crop.integral.width)) × \(Int(crop.integral.height)) px")
-                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                        .font(.system(size: 12, design: .monospaced)).foregroundStyle(.primary)
                         .accessibilityLabel("裁剪尺寸")
                 }
                 .lineLimit(1).minimumScaleFactor(0.9).frame(width: 112, alignment: .leading)

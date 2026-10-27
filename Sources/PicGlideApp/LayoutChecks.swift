@@ -91,6 +91,37 @@ func runLayoutChecks(delegate: AppDelegate, output: URL) async {
         model.chooseTool(.crop)
         let pending = model.frame!.bounds.insetBy(dx: 20, dy: 20)
         model.pendingCrop = pending
+        let frameBeforePixelChecks = window.frame
+        for (screenIndex, screen) in NSScreen.screens.enumerated() {
+            window.setFrame(NSRect(x: screen.visibleFrame.minX, y: screen.visibleFrame.minY,
+                width: 1100, height: 760), display: true)
+            for (theme, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+                window.appearance = NSAppearance(named: appearance)
+                model.pendingCrop = CGRect(x: 600, y: 200, width: 309, height: 188)
+                model.setZoom(actualSize: false)
+                try await Task.sleep(for: .milliseconds(100))
+                let canvas = model.canvas!
+                canvas.viewport.pan.x += 0.27; canvas.viewport.pan.y += 0.39
+                canvas.updateCropControls()
+                let panel = canvas.cropControls!, pixels = canvas.convertToBacking(panel.frame)
+                let record: [String: Any] = ["scenario": "crop text pixel alignment", "theme": theme,
+                    "screen": screen.localizedName, "backingScale": window.backingScaleFactor,
+                    "framePixels": [pixels.minX, pixels.minY, pixels.width, pixels.height],
+                    "layerScale": panel.layer?.contentsScale ?? 0]
+                try JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
+                    .write(to: output.appendingPathComponent("crop-text-\(theme)-\(screenIndex).json"))
+                try capture("crop-text-\(theme)-\(screenIndex)")
+                precondition([pixels.minX, pixels.minY, pixels.width, pixels.height].allSatisfy {
+                    abs($0 - $0.rounded()) < 0.001
+                }, "Crop controls are placed between physical pixels: \(pixels)")
+                precondition(canvas.bounds.contains(panel.frame), "Aligned crop controls leave the canvas")
+                records.append(record)
+            }
+        }
+        window.appearance = NSAppearance(named: .aqua)
+        window.setFrame(frameBeforePixelChecks, display: true)
+        model.pendingCrop = pending
+        model.setZoom(actualSize: false)
         model.chooseTool(.pencil)
         precondition(model.pendingCrop == pending && model.tool == .crop,
                      "Switching tools silently discards an unconfirmed crop")

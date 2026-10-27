@@ -326,7 +326,9 @@ final class CanvasView: NSView {
         }
         let fitting = origins.map { CGRect(origin: $0, size: CropControls.size) }
             .first { area.contains($0) && !$0.intersects(toolbar) }
-        controls.frame = fitting ?? candidates.first(where: { !$0.intersects(toolbar) }) ?? candidates.last!
+        let target = fitting ?? candidates.first(where: { !$0.intersects(toolbar) }) ?? candidates.last!
+        // Fractional backing pixels blur the hosting view's text as it follows the selection.
+        controls.frame = backingAlignedRect(target, options: .alignAllEdgesNearest)
         window?.invalidateCursorRects(for: self)
     }
 
