@@ -5,6 +5,9 @@ struct ViewerView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @FocusState private var focusedBrowserControl: BrowserControl?
+
+    private enum BrowserControl: Hashable { case previous, next, zoom }
 
     private var canvasColor: Color {
         colorScheme == .dark ? Color(white: 0.085) : Color(white: 0.91)
@@ -51,6 +54,10 @@ struct ViewerView: View {
         .ignoresSafeArea()
         .frame(minWidth: 600, minHeight: 400)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: model.navigationHover)
+        .onChange(of: focusedBrowserControl) { _, control in
+            model.toolbarFocused = control != nil
+            model.revealControls()
+        }
     }
 
     private func navigationButton(_ direction: Int) -> some View {
@@ -166,12 +173,14 @@ struct ViewerView: View {
                 } else {
                     iconButton("上一张", symbol: "chevron.left", enabled: model.index > 0 && model.canNavigate,
                                help: model.index > 0 ? "上一张（← / ↑）" : "第一张") { model.navigate(-1) }
+                        .focused($focusedBrowserControl, equals: .previous)
                     Text("\(model.index + 1) / \(model.files.count)")
                         .font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
                         .lineLimit(1).frame(width: 78)
                         .accessibilityLabel("第 \(model.index + 1) 张，共 \(model.files.count) 张")
                     iconButton("下一张", symbol: "chevron.right", enabled: model.index + 1 < model.files.count && model.canNavigate,
                                help: model.index + 1 < model.files.count ? "下一张（→ / ↓）" : "最后一张") { model.navigate(1) }
+                        .focused($focusedBrowserControl, equals: .next)
                     separator
                 }
                 zoomMenu
@@ -211,6 +220,7 @@ struct ViewerView: View {
         .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 72, height: 32)
         .background(CursorRegion(cursor: .pointingHand, help: "缩放"))
         .accessibilityLabel("缩放比例").accessibilityIdentifier("view.zoom")
+        .focused($focusedBrowserControl, equals: .zoom)
     }
 
     @ViewBuilder private var toolOptions: some View {

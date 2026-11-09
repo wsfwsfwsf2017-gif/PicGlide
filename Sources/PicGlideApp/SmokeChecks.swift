@@ -209,6 +209,81 @@ func runSmokeChecks(delegate: AppDelegate) async {
         }
         checks.append("300ms tooltip, movement within button preserves delay and keyboard focus: \(name)")
     }
+    func checkIdleControls(_ canvas: CanvasView) async throws {
+        let model = delegate.model
+        defer { mouse(.leftMouseUp, at: delegate.window.mouseLocationOutsideOfEventStream) }
+        try await hover(canvas)
+        let scale = canvas.viewport.scale, pan = canvas.viewport.pan
+        let toolbar = model.toolbarCursorRegion!
+        let oldCenter = toolbar.convert(NSPoint(x: toolbar.bounds.midX, y: toolbar.bounds.midY), to: nil)
+        let started = Date()
+        try await wait { !model.controlsVisible }
+        measurements["idleHideSeconds"] = Date().timeIntervalSince(started)
+        try await Task.sleep(for: .milliseconds(250))
+        guard model.toolbarCursorRegion == nil, canvas.viewport.scale == scale, canvas.viewport.pan == pan else {
+            fatalError("Hidden toolbar leaves cursor regions or changes the image")
+        }
+        try capture("idle-hidden")
+        checks.append("Native canvas movement reveals controls; idle hides them without changing the viewport")
+
+        try await hover(canvas)
+        try await Task.sleep(for: .milliseconds(250))
+        try await hover(model.toolbarCursorRegion!, point: NSPoint(x: 4, y: 24))
+        try await Task.sleep(for: .milliseconds(2300))
+        guard model.controlsVisible && model.toolbarHovered else { fatalError("Hovered toolbar disappears") }
+        let zoom = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == "缩放" }!
+        try await hover(zoom)
+        var menuStayedVisible = false
+        let dismiss = Timer(timeInterval: 2.4, repeats: false) { _ in
+            MainActor.assumeIsolated {
+                menuStayedVisible = model.controlsVisible && model.toolbarMenuTracking
+                CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: true)?.post(tap: .cghidEventTap)
+                CGEvent(keyboardEventSource: nil, virtualKey: 53, keyDown: false)?.post(tap: .cghidEventTap)
+            }
+        }
+        RunLoop.main.add(dismiss, forMode: .eventTracking)
+        RunLoop.main.add(dismiss, forMode: .default)
+        let zoomPoint = zoom.convert(NSPoint(x: zoom.bounds.midX, y: zoom.bounds.midY), to: nil)
+        mouse(.leftMouseDown, at: zoomPoint); mouse(.leftMouseUp, at: zoomPoint)
+        try await wait { menuStayedVisible && !model.toolbarMenuTracking }
+        try await hover(canvas)
+        try await wait { !model.controlsVisible }
+        checks.append("Native hover and open zoom menu stay visible; menu dismissal and leaving resume idle hiding")
+
+        try await Task.sleep(for: .milliseconds(250))
+        mouse(.leftMouseDown, at: oldCenter)
+        try await wait { canvas.hasActiveGesture }
+        let end = NSPoint(x: oldCenter.x + 18, y: oldCenter.y + 10)
+        mouse(.leftMouseDragged, at: end)
+        try await Task.sleep(for: .milliseconds(2300))
+        guard model.controlsVisible && canvas.viewport.pan != pan && NSCursor.current === NSCursor.closedHand else {
+            throw NSError(domain: "PicGlideSmoke", code: 8, userInfo: [NSLocalizedDescriptionKey:
+                "Hidden-toolbar drag: visible=\(model.controlsVisible), active=\(canvas.hasActiveGesture), moved=\(canvas.viewport.pan != pan), closedHand=\(NSCursor.current === NSCursor.closedHand), hovered=\(model.toolbarHovered)"])
+        }
+        mouse(.leftMouseUp, at: end)
+        try await hover(canvas)
+        try await wait { !model.controlsVisible }
+        checks.append("Native drag starts through the hidden toolbar, stays visible while held and hides after release")
+
+        for help in ["展开编辑工具（⌘E）", "收起编辑工具（⌘E）"] {
+            let button = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == help }!
+            try await hover(button)
+            let point = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil)
+            mouse(.leftMouseDown, at: point); mouse(.leftMouseUp, at: point)
+            try await wait { model.isEditing == (help == "展开编辑工具（⌘E）") }
+            try await hover(canvas)
+            try await Task.sleep(for: .milliseconds(2300))
+            guard model.controlsVisible == model.isEditing else { fatalError("Edit toggle breaks browser idle hiding") }
+        }
+        checks.append("Native edit button keeps editing controls visible; closing tools resumes browser idle hiding")
+        try await hover(canvas)
+        let beforeWheel = canvas.viewport.scale
+        CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: 2, wheel2: 0, wheel3: 0)?
+            .post(tap: .cghidEventTap)
+        try await wait { canvas.viewport.scale != beforeWheel && model.controlsVisible }
+        try await wait { !model.controlsVisible }
+        checks.append("Native scroll zoom reveals controls and restarts idle hiding")
+    }
     func respondToAlert(_ title: String) {
         let timer = Timer(timeInterval: 0.2, repeats: false) { _ in
             MainActor.assumeIsolated {
@@ -375,6 +450,16 @@ func runSmokeChecks(delegate: AppDelegate) async {
         }
         let mousePosition = CGEvent(source: nil)!.location
         defer { CGWarpMouseCursorPosition(mousePosition) }
+        try await checkIdleControls(canvas)
+        if ProcessInfo.processInfo.environment["PICGLIDE_IDLE_ONLY"] == "1" {
+            try JSONSerialization.data(withJSONObject: ["checks": checks, "measurements": measurements],
+                                       options: [.prettyPrinted, .sortedKeys])
+                .write(to: output.appendingPathComponent("ui-report.json"))
+            print("PICGLIDE_UI_IDLE_PASS \(checks.count) checks")
+            fflush(stdout)
+            model.history.markSaved(); NSApp.terminate(nil)
+            return
+        }
         let navigationFolder = output.appendingPathComponent("navigation")
         let singleFolder = navigationFolder.appendingPathComponent("single")
         try FileManager.default.createDirectory(at: singleFolder, withIntermediateDirectories: true)

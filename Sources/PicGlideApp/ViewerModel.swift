@@ -44,6 +44,8 @@ final class ViewerModel {
     var zoomPercentage: Double = 100
     var controlsVisible = true
     var toolbarHovered = false
+    var toolbarFocused = false
+    var toolbarMenuTracking = false
     var navigationHover = 0
     var loadingError: String?
     var savedFeedback = false
@@ -106,14 +108,19 @@ final class ViewerModel {
         return "\(Int(bounds.width)) × \(Int(bounds.height))"
     }
 
+    private var canHideControls: Bool {
+        frame != nil && !isEditing && !toolbarHovered && !toolbarFocused && !toolbarMenuTracking &&
+            !isBusy && canvas?.hasActiveGesture != true && NSApp.modalWindow == nil
+    }
+
     func revealControls() {
         controlsVisible = true
         hideTask?.cancel()
-        guard frame != nil, !isEditing, !toolbarHovered, !isBusy else { return }
+        guard canHideControls else { return }
         hideTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(2))
-            guard !Task.isCancelled, let self, !isEditing, !toolbarHovered, !isBusy else { return }
-            guard window?.firstResponder is CanvasView else { return }
+            guard !Task.isCancelled, let self, canHideControls else { return }
+            window?.hideTooltip()
             controlsVisible = false
         }
     }

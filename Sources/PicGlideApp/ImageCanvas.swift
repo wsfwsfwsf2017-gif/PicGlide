@@ -40,6 +40,7 @@ final class CanvasView: NSView {
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
+    var hasActiveGesture: Bool { dragStart != nil }
 
     init(model: ViewerModel) {
         self.model = model
@@ -280,7 +281,10 @@ final class CanvasView: NSView {
         context.restoreGState()
     }
 
-    override func mouseMoved(with event: NSEvent) { trackPointer(at: event.locationInWindow); model.revealControls() }
+    override func mouseMoved(with event: NSEvent) {
+        if !model.isEditing, model.toolbarFocused { window?.makeFirstResponder(self) }
+        trackPointer(at: event.locationInWindow); model.revealControls()
+    }
     override func mouseExited(with event: NSEvent) { pointer = nil; needsDisplay = true }
 
     private func cropHit(_ point: CGPoint) -> CropAdjustment? {
@@ -465,6 +469,7 @@ final class CanvasView: NSView {
         }
         clearGesture()
         if !pendingMosaics.isEmpty { prepareMosaicPreview() }
+        model.revealControls()
         updateCropControls(); window?.invalidateCursorRects(for: self); needsDisplay = true
     }
 
@@ -501,6 +506,7 @@ final class CanvasView: NSView {
             updateCropControls(); window?.invalidateCursorRects(for: self); needsDisplay = true
         default: super.keyDown(with: event)
         }
+        model.revealControls()
     }
 
     override func keyUp(with event: NSEvent) {

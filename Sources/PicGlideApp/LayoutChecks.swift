@@ -81,7 +81,84 @@ func runLayoutChecks(delegate: AppDelegate, output: URL) async {
         }
         model.requestOpen(fixture)
         try await wait { model.frame != nil && !model.isLoading }
+        let idleCanvas = model.canvas!
+        let idleScale = idleCanvas.viewport.scale, idlePan = idleCanvas.viewport.pan
+        let oldToolbar = idleCanvas.convert(model.toolbarCursorRegion!.cursorRect, from: model.toolbarCursorRegion!)
+        window.makeFirstResponder(nil)
+        model.toolbarHovered = false; model.revealControls()
+        try await Task.sleep(for: .milliseconds(2300))
+        precondition(!model.controlsVisible, "Browser controls stay visible after focus leaves the canvas")
+        precondition(model.toolbarCursorRegion == nil && idleCanvas.canvasCursorRects.contains {
+            $0.contains(NSPoint(x: oldToolbar.midX, y: oldToolbar.midY))
+        }, "Hidden controls leave a cursor exclusion on the canvas")
+        checkFileActions(); try capture("browser-idle")
+        records.append(["scenario": "browser controls hide without canvas focus"])
+
+        func moveOnCanvas() {
+            let event = NSEvent.mouseEvent(with: .mouseMoved,
+                location: idleCanvas.convert(NSPoint(x: 100, y: 100), to: nil), modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 1, clickCount: 0, pressure: 0)!
+            idleCanvas.mouseMoved(with: event)
+        }
+        moveOnCanvas()
+        precondition(model.controlsVisible)
+        try await Task.sleep(for: .milliseconds(1200))
+        moveOnCanvas()
+        try await Task.sleep(for: .milliseconds(1200))
+        precondition(model.controlsVisible, "Continued mouse movement does not reset the idle timer")
+        try await Task.sleep(for: .milliseconds(1100))
+        precondition(!model.controlsVisible && idleCanvas.viewport.scale == idleScale && idleCanvas.viewport.pan == idlePan,
+                     "Hiding controls changes the image viewport")
+        records.append(["scenario": "canvas movement reveals and resets controls without moving the image"])
+
+        model.toolbarHovered = true; model.revealControls()
+        try await Task.sleep(for: .milliseconds(2300))
+        precondition(model.controlsVisible, "Hovered controls disappear")
+        model.toolbarHovered = false; model.revealControls()
+        model.toolbarFocused = true; model.revealControls()
+        try await Task.sleep(for: .milliseconds(2300))
+        precondition(model.controlsVisible, "Keyboard-focused controls disappear")
+        model.toolbarFocused = false; model.revealControls()
+        try await Task.sleep(for: .milliseconds(2300))
+        precondition(!model.controlsVisible, "Idle timer does not resume after control interaction")
+        records.append(["scenario": "hover and keyboard focus protect controls; leaving resumes idle hiding"])
+
+        let trackedMenu = NSMenu(title: "缩放检查"), nestedMenu = NSMenu(title: "子菜单检查")
+        for menu in [trackedMenu, nestedMenu] {
+            NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: menu)
+        }
+        NotificationCenter.default.post(name: NSMenu.didEndTrackingNotification, object: nestedMenu)
+        try await Task.sleep(for: .milliseconds(2300))
+        precondition(model.controlsVisible && model.toolbarMenuTracking, "Controls disappear while a menu is tracking")
+        NotificationCenter.default.post(name: NSMenu.didEndTrackingNotification, object: trackedMenu)
+        model.toolbarHovered = false; model.revealControls()
+        try await Task.sleep(for: .milliseconds(2300))
+        precondition(!model.controlsVisible && !model.toolbarMenuTracking,
+                     "Closing a menu does not resume idle hiding: visible=\(model.controlsVisible), tracking=\(model.toolbarMenuTracking), hover=\(model.toolbarHovered), focus=\(model.toolbarFocused)")
+        records.append(["scenario": "nested menu tracking protects controls and closing resumes idle hiding"])
+
+        func idleGesture(_ type: NSEvent.EventType) {
+            let event = NSEvent.mouseEvent(with: type,
+                location: idleCanvas.convert(NSPoint(x: idleCanvas.bounds.midX, y: idleCanvas.bounds.midY), to: nil),
+                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+            if type == .leftMouseDown { idleCanvas.mouseDown(with: event) }
+            else { idleCanvas.mouseUp(with: event) }
+        }
+        idleGesture(.leftMouseDown)
+        try await Task.sleep(for: .milliseconds(2300))
+        precondition(model.controlsVisible && idleCanvas.hasActiveGesture, "Controls disappear during a stationary drag")
+        idleGesture(.leftMouseUp)
+        try await Task.sleep(for: .milliseconds(1200))
+        precondition(model.controlsVisible, "Mouse release does not start a fresh idle interval")
+        try await Task.sleep(for: .milliseconds(1100))
+        precondition(!model.controlsVisible && !idleCanvas.hasActiveGesture)
+        records.append(["scenario": "stationary drag protects controls and release starts a fresh idle interval"])
         model.toggleEditing(); try await wait { model.isEditing && !model.isPreparingEdit }
+        try await Task.sleep(for: .milliseconds(2300))
+        precondition(model.controlsVisible && model.toolbarCursorRegion != nil, "Editing controls auto-hide")
+        records.append(["scenario": "editing controls remain visible"])
         let originalFile = try Data(contentsOf: fixture)
         model.commit(.rectangle(CGRect(x: 50, y: 60, width: 100, height: 80), ink: model.ink, width: 4))
         model.commit(.rectangle(CGRect(x: 200, y: 200, width: 80, height: 70), ink: model.ink, width: 3))

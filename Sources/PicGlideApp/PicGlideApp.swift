@@ -26,9 +26,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private(set) var window: PicGlideWindow!
     private var allowClose = false
     private var allowTermination = false
+    private var trackingMenus: Set<ObjectIdentifier> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
+        for name in [NSMenu.didBeginTrackingNotification, NSMenu.didEndTrackingNotification] {
+            NotificationCenter.default.addObserver(self, selector: #selector(menuTrackingChanged(_:)), name: name, object: nil)
+        }
         window = PicGlideWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false)
@@ -100,6 +104,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func windowDidResignKey(_ notification: Notification) {
         model.cancelGestureID = UUID()
         model.navigationHover = 0
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) { model.revealControls() }
+
+    @objc private func menuTrackingChanged(_ notification: Notification) {
+        guard let menu = notification.object as? NSMenu else { return }
+        let id = ObjectIdentifier(menu)
+        if notification.name == NSMenu.didBeginTrackingNotification { trackingMenus.insert(id) }
+        else { trackingMenus.remove(id) }
+        model.toolbarMenuTracking = !trackingMenus.isEmpty
+        if !model.toolbarMenuTracking, let region = model.toolbarCursorRegion, let window {
+            model.toolbarHovered = region.convert(region.cursorRect, to: nil).contains(window.mouseLocationOutsideOfEventStream)
+        }
+        model.revealControls()
     }
 
     func windowWillUseStandardFrame(_ window: NSWindow, defaultFrame newFrame: NSRect) -> NSRect {
@@ -314,6 +332,10 @@ final class PicGlideWindow: NSWindow {
 
     private func updateCursor(at point: NSPoint) {
         guard isKeyWindow, let canvas = model?.canvas else { return }
+        if canvas.hasActiveGesture, canvas.canvasCursor === NSCursor.closedHand {
+            NSCursor.closedHand.set()
+            return
+        }
         if let contentView, let cursor = CursorRegionView.cursor(at: point, in: contentView) {
             // SwiftUI hosting views can replace cursor rects registered by their transparent backgrounds.
             cursor.set()
