@@ -279,7 +279,7 @@ final class ViewerModel {
     func fill(at point: CGPoint) {
         guard isEditing, canChooseTool, pendingMosaicCount == 0, !isDrawing,
               let source, let originalBounds else { return }
-        let ink = Ink(red: self.ink.red, green: self.ink.green, blue: self.ink.blue)
+        let ink = self.ink
         let operations = history.operations, token = generation, revision = editRevision
         let id = UUID(); fillID = id; isFilling = true; revealControls()
         let task = Task.detached(priority: .userInitiated) {
@@ -309,11 +309,12 @@ final class ViewerModel {
         guard isEditing, canChooseTool, !isDrawing, pendingMosaicCount == 0,
               let bounds = frame?.bounds, bounds.contains(point) else { return }
         isShowingPanel = true; revealControls()
-        let panel = TextDrawingPanel(at: point, within: bounds, color: NSColor(color), fontSize: textSize, bold: textBold)
+        let panel = TextDrawingPanel(at: point, within: bounds, color: NSColor(color).withAlphaComponent(opacity), fontSize: textSize, bold: textBold)
         let patch = panel.run(for: window)
         isShowingPanel = false
         if let patch {
             textSize = panel.fontSize; textBold = panel.bold
+            color = Color(nsColor: panel.selectedColor.withAlphaComponent(1)); opacity = panel.selectedColor.alphaComponent
             commit(.text(patch: patch))
         }
         window?.makeFirstResponder(canvas); revealControls()

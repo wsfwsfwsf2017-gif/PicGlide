@@ -196,7 +196,7 @@ struct ViewerView: View {
                 toolOptions.padding(.horizontal, 14).frame(height: 43)
             }
         }
-        .frame(width: model.isEditing ? (model.hasToolOptions ? 560 : 448) : model.isUntitled ? 112 : 280)
+        .frame(width: model.isEditing ? (model.tool == .mosaic ? 560 : 448) : model.isUntitled ? 112 : 280)
         .background(CursorRegion(cursor: .arrow, model: model))
         .background {
             if reduceTransparency {
@@ -237,15 +237,13 @@ struct ViewerView: View {
                 parameter("颗粒", value: $model.blockSize, range: 4...64, unit: "px", id: "blockSize", sliderWidth: 80)
             case .pencil, .rectangle:
                 Text("颜色").foregroundStyle(.secondary).fixedSize()
-                ColorPicker("颜色", selection: $model.color, supportsOpacity: false).labelsHidden().frame(width: 44)
-                    .accessibilityLabel("画笔颜色")
+                SimpleColorPicker(color: $model.color, opacity: $model.opacity, label: "画笔颜色")
+                    .frame(width: 44, height: 24).background(CursorRegion(cursor: .pointingHand, help: "颜色"))
                 parameter("粗细", value: $model.lineWidth, range: 1...64, unit: "px", id: "lineWidth", sliderWidth: 54)
-                parameter("透明度", value: Binding(get: { (model.opacity * 100).rounded() }, set: { model.opacity = $0 / 100 }),
-                          range: 5...100, unit: "%", id: "opacity", sliderWidth: 54)
             case .fill:
                 Text("颜色").foregroundStyle(.secondary)
-                ColorPicker("颜色", selection: $model.color, supportsOpacity: false).labelsHidden().frame(width: 44)
-                    .accessibilityLabel("填色颜色")
+                SimpleColorPicker(color: $model.color, opacity: $model.opacity, label: "填色颜色")
+                    .frame(width: 44, height: 24).background(CursorRegion(cursor: .pointingHand, help: "颜色"))
             default: EmptyView()
             }
         }

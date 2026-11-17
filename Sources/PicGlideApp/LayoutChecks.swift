@@ -61,6 +61,16 @@ func runLayoutChecks(delegate: AppDelegate, output: URL) async {
     }
     do {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let palette = ColorPaletteController(color: .black, onChange: { _ in })
+        for field in palette.numberFields {
+            for (value, selector, expected) in [(Int.max, #selector(NSResponder.moveUp(_:)), field.tag == 3 ? 100 : 255),
+                                               (Int.min, #selector(NSResponder.moveDown(_:)), 0)] {
+                field.stringValue = String(value)
+                precondition(palette.control(field, textView: NSTextView(), doCommandBy: selector))
+                precondition(field.stringValue == String(expected))
+            }
+        }
+        records.append(["scenario": "RGB and opacity fields safely clamp extreme pasted numbers before keyboard stepping"])
         try capture("welcome")
         let fixture = output.deletingLastPathComponent().appendingPathComponent("图片浏览与标注验证-长文件名布局测试.png")
         if !FileManager.default.fileExists(atPath: fixture.path) {

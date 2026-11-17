@@ -126,6 +126,31 @@ private func drawingImage(width: Int, height: Int, pixels: [UInt8]) throws -> CG
     #expect(multiline.bounds.height > regular.bounds.height)
 }
 
+@Test func allColoredToolsKeepOpacityThroughLosslessExport() throws {
+    let size = try CanvasSize(width: 100, height: 80)
+    let source = try drawingImage(width: 100, height: 80, pixels: Array(repeating: 0, count: 100 * 80 * 4))
+    let ink = Ink(red: 1, green: 0, blue: 0, alpha: 0.4)
+    let frame = RenderedImage(image: source, bounds: size.bounds)
+    let mask = try #require(try ImageRenderer.fillMask(in: frame, at: .zero, ink: ink))
+    let text = try ImageRenderer.textPatch("字", at: CGPoint(x: 5, y: 5), within: size.bounds,
+        fontSize: 32, bold: true, ink: ink)
+    let operations: [EditOperation] = [.fill(mask: mask, ink: ink), .text(patch: text),
+        .pencil([CGPoint(x: 40, y: 40)], ink: ink, width: 16),
+        .rectangle(CGRect(x: 20, y: 20, width: 50, height: 40), ink: ink, width: 8)]
+    for operation in operations {
+        let rendered = try ImageRenderer.render(source: source, originalBounds: size.bounds, operations: [operation])
+        let pixels = try drawingPixels(rendered.image)
+        let alpha = stride(from: 3, to: pixels.count, by: 4).map { pixels[$0] }
+        #expect(alpha.max() == 102)
+        for format in [ImageFormat.png, .webp] {
+            let data = try ImageCodec.encode(rendered.image, format: format)
+            let encoded = try #require(CGImageSourceCreateWithData(data as CFData, nil))
+            let decoded = try #require(CGImageSourceCreateImageAtIndex(encoded, 0, nil))
+            #expect(try drawingPixels(decoded) == pixels)
+        }
+    }
+}
+
 @Test func textFitsAtEdgesAndRejectsInvalidInput() throws {
     let bounds = CGRect(x: 20, y: 30, width: 400, height: 200)
     let rect = try ImageRenderer.textBounds("Hello", at: CGPoint(x: 419, y: 229), within: bounds, fontSize: 32, bold: false)

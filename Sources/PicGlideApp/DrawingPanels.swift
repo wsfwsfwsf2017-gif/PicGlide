@@ -100,20 +100,11 @@ final class NewCanvasPanel: NSPanel, NSTextFieldDelegate {
 }
 
 @MainActor
-private final class TextColorWell: NSColorWell {
-    override func activate(_ exclusive: Bool) {
-        super.activate(exclusive)
-        // A color well inside a modal sheet must explicitly bring its panel forward.
-        NSColorPanel.shared.makeKeyAndOrderFront(self)
-    }
-}
-
-@MainActor
 final class TextDrawingPanel: NSPanel, NSTextViewDelegate, NSTextFieldDelegate {
     private let textView = NSTextView()
     private let sizeField = NSTextField(string: "32")
     private let stepper = NSStepper()
-    private let colorWell = TextColorWell()
+    private let colorButton = PaletteColorButton()
     private let boldButton = NSButton(checkboxWithTitle: "加粗", target: nil, action: nil)
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
     private let add = NSButton(title: "添加文字", target: nil, action: nil)
@@ -122,6 +113,7 @@ final class TextDrawingPanel: NSPanel, NSTextViewDelegate, NSTextFieldDelegate {
     private var result: RenderedImage?
     var fontSize: Double { Double(sizeField.stringValue) ?? .nan }
     var bold: Bool { boldButton.state == .on }
+    var selectedColor: NSColor { colorButton.color }
 
     init(at point: CGPoint, within bounds: CGRect, color: NSColor, fontSize: Double, bold: Bool) {
         self.point = point; self.imageBounds = bounds
@@ -135,10 +127,9 @@ final class TextDrawingPanel: NSPanel, NSTextViewDelegate, NSTextFieldDelegate {
         let scroll = NSScrollView(); scroll.hasVerticalScroller = true; scroll.borderType = .bezelBorder
         scroll.documentView = textView; scroll.heightAnchor.constraint(equalToConstant: 120).isActive = true
         textView.frame = NSRect(x: 0, y: 0, width: 340, height: 120)
-        colorWell.color = color; colorWell.target = self; colorWell.action = #selector(styleChanged(_:))
-        colorWell.supportsAlpha = false
-        colorWell.widthAnchor.constraint(equalToConstant: 44).isActive = true
-        colorWell.identifier = NSUserInterfaceItemIdentifier("drawing.text.color"); colorWell.setAccessibilityLabel("文字颜色")
+        colorButton.color = color
+        colorButton.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        colorButton.identifier = NSUserInterfaceItemIdentifier("drawing.text.color"); colorButton.setAccessibilityLabel("文字颜色")
         sizeField.stringValue = String(Int(fontSize)); sizeField.delegate = self; sizeField.alignment = .right
         sizeField.widthAnchor.constraint(equalToConstant: 54).isActive = true
         sizeField.identifier = NSUserInterfaceItemIdentifier("drawing.text.size"); sizeField.setAccessibilityLabel("字号（像素）")
@@ -146,7 +137,7 @@ final class TextDrawingPanel: NSPanel, NSTextViewDelegate, NSTextFieldDelegate {
         stepper.target = self; stepper.action = #selector(stepSize(_:)); stepper.setAccessibilityLabel("调整字号")
         boldButton.state = bold ? .on : .off; boldButton.target = self; boldButton.action = #selector(styleChanged(_:))
         boldButton.identifier = NSUserInterfaceItemIdentifier("drawing.text.bold")
-        let style = NSStackView(views: [NSTextField(labelWithString: "颜色"), colorWell,
+        let style = NSStackView(views: [NSTextField(labelWithString: "颜色"), colorButton,
             NSTextField(labelWithString: "字号"), sizeField, stepper, boldButton]); style.spacing = 8
         errorLabel.font = .systemFont(ofSize: 11); errorLabel.textColor = .systemRed
         errorLabel.heightAnchor.constraint(equalToConstant: 30).isActive = true
@@ -162,16 +153,7 @@ final class TextDrawingPanel: NSPanel, NSTextViewDelegate, NSTextFieldDelegate {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func run(for owner: NSWindow?) -> RenderedImage? {
-        let colors = NSColorPanel.shared
-        let previousLevel = colors.level, previousBehavior = colors.collectionBehavior
-        let previouslyWorkedWhenModal = colors.worksWhenModal
-        colors.worksWhenModal = true; colors.level = .modalPanel
-        colors.collectionBehavior.insert(.fullScreenAuxiliary)
-        defer {
-            colorWell.deactivate(); colors.orderOut(nil)
-            colors.level = previousLevel; colors.collectionBehavior = previousBehavior
-            colors.worksWhenModal = previouslyWorkedWhenModal
-        }
+        defer { colorButton.closePalette() }
         return runDrawingPanel(self, for: owner) == .OK ? result : nil
     }
     private func validate() {
@@ -201,9 +183,10 @@ final class TextDrawingPanel: NSPanel, NSTextViewDelegate, NSTextFieldDelegate {
     @objc private func confirm(_ sender: Any?) {
         guard !textView.hasMarkedText() else { return }
         do {
-            let rgb = colorWell.color.usingColorSpace(.sRGB) ?? .black
+            let rgb = selectedColor.usingColorSpace(.sRGB) ?? .black
             result = try ImageRenderer.textPatch(textView.string, at: point, within: imageBounds,
-                fontSize: fontSize, bold: bold, ink: Ink(red: rgb.redComponent, green: rgb.greenComponent, blue: rgb.blueComponent))
+                fontSize: fontSize, bold: bold, ink: Ink(red: rgb.redComponent, green: rgb.greenComponent,
+                    blue: rgb.blueComponent, alpha: rgb.alphaComponent))
             NSApp.stopModal(withCode: .OK)
         } catch { errorLabel.stringValue = error.localizedDescription }
     }

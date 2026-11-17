@@ -63,6 +63,22 @@ func runDrawingChecks(delegate: AppDelegate, output: URL) async {
         field.stringValue = value
         field.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: field))
     }
+    func chooseColor(_ button: PaletteColorButton, rgb: [Int], opacity: Double) {
+        button.performClick(nil)
+        precondition(button.popover?.isShown == true && button.palette?.numberFields.count == 4)
+        let palette = button.palette!
+        for (field, value) in zip(palette.numberFields, rgb + [Int(opacity * 100)]) {
+            editField(field, value: String(value))
+        }
+        precondition(button.color.alphaComponent == opacity)
+        let selected = button.color
+        for invalid in ["-1", "256", "1.5", "NaN", ""] {
+            editField(palette.numberFields[0], value: invalid)
+            precondition(button.color == selected)
+        }
+        editField(palette.numberFields[0], value: String(rgb[0]))
+        button.closePalette()
+    }
     func savePanel(to target: URL, format: ImageFormat = .png, cancel: Bool = false) {
         // System save panels live in an XPC service; exercise their actual controls with the external UI driver.
         let request: [String: Any] = ["target": target.path, "format": format.title, "cancel": cancel]
@@ -146,11 +162,14 @@ func runDrawingChecks(delegate: AppDelegate, output: URL) async {
         model.commit(.rectangle(CGRect(x: 100, y: 100, width: 500, height: 400), ink: ink, width: 6))
         try await wait { model.frameRevision == model.editRevision }
         model.color = Color(red: ink.red, green: ink.green, blue: ink.blue)
+        model.opacity = 0.4
         model.fill(at: CGPoint(x: 150, y: 150))
         precondition(!model.canSave && !model.canUndo && !model.canChooseTool)
         model.fill(at: CGPoint(x: 150, y: 150))
         try await wait { !model.isFilling && model.frameRevision == model.editRevision }
         precondition(model.history.operations.count == 2)
+        if case let .fill(_, fillInk) = model.history.operations.last! { precondition(fillInk.alpha == 0.4) }
+        else { preconditionFailure("Expected translucent fill") }
         model.undo(); model.redo()
         try await wait { model.frameRevision == model.editRevision }
         let count = model.history.operations.count
@@ -160,9 +179,11 @@ func runDrawingChecks(delegate: AppDelegate, output: URL) async {
         checks.append("Closed-frame fill, same-color no-op, busy guards, undo/redo and cancellation")
 
         model.chooseTool(.text)
+        let inkBeforeText = model.ink
         modal { panel in
-            precondition(NSColorPanel.shared.worksWhenModal && NSColorPanel.shared.level == .modalPanel &&
-                NSColorPanel.shared.collectionBehavior.contains(.fullScreenAuxiliary))
+            let color = control("drawing.text.color", in: panel, as: PaletteColorButton.self)
+            precondition(color.color.alphaComponent == model.opacity)
+            chooseColor(color, rgb: [0, 153, 255], opacity: 0.2)
             let add = button("添加文字", in: panel)
             precondition(!add.isEnabled && !model.canSave && !model.canToggleEditing)
             let text = control("drawing.text.content", in: panel, as: NSTextView.self)
@@ -175,7 +196,7 @@ func runDrawingChecks(delegate: AppDelegate, output: URL) async {
             button("取消", in: panel).performClick(nil)
         }
         model.addText(at: CGPoint(x: 120, y: 120))
-        precondition(model.history.operations.count == count)
+        precondition(model.history.operations.count == count && model.ink == inkBeforeText)
         modal { panel in
             precondition(NSApp.keyWindow === panel)
             let text = control("drawing.text.content", in: panel, as: NSTextView.self)
@@ -190,14 +211,14 @@ func runDrawingChecks(delegate: AppDelegate, output: URL) async {
             editField(control("drawing.text.size", in: panel, as: NSTextField.self), value: "48")
             let bold = control("drawing.text.bold", in: panel, as: NSButton.self)
             bold.performClick(nil)
-            let color = control("drawing.text.color", in: panel, as: NSColorWell.self)
-            color.color = .systemRed
+            let color = control("drawing.text.color", in: panel, as: PaletteColorButton.self)
+            chooseColor(color, rgb: [255, 0, 0], opacity: 0.5)
             precondition(!delegate.windowShouldClose(window) && delegate.applicationShouldTerminate(NSApp) == .terminateCancel)
             button("添加文字", in: panel).performClick(nil)
         }
         model.addText(at: CGPoint(x: 120, y: 120))
         try await wait { model.frameRevision == model.editRevision }
-        precondition(model.history.operations.count == count + 1 && model.isEditing)
+        precondition(model.history.operations.count == count + 1 && model.isEditing && model.opacity == 0.5)
         checks.append("Text dialog validates input, cancels cleanly, supports input undo, Chinese, multiline, bold and color; blocks document close")
 
         model.chooseTool(.crop); model.pendingCrop = CGRect(x: 50, y: 60, width: 800, height: 600)

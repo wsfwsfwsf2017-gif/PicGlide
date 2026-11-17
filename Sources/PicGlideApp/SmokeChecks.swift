@@ -1,5 +1,6 @@
 #if DEBUG
 import AppKit
+import SwiftUI
 import PicGlideCore
 import Darwin
 
@@ -638,14 +639,14 @@ func runSmokeChecks(delegate: AppDelegate) async {
         checks.append("Space temporarily changes editor cursor to hand")
         let controls = nativeControls(in: delegate.window.contentView!)
         measurements["editorNativeControls"] = controls.map { String(describing: type(of: $0)) }
-        for control in controls where control is NSSlider || control is NSColorWell {
+        for control in controls where control is NSSlider {
             try await hover(control)
             guard NSCursor.current === NSCursor.arrow else { fatalError("Native editor control cursor is not arrow") }
         }
         let sliders = cursorRegions(in: delegate.window.contentView!).filter {
             $0.cursor === NSCursor.arrow && ["粗细", "透明度"].contains($0.helpText)
         }
-        guard sliders.count == 2 else { fatalError("Editor slider cursor regions missing") }
+        guard sliders.count == 1 else { fatalError("Brush width slider missing or opacity is duplicated outside the palette") }
         for slider in sliders {
             try await hover(slider)
             guard NSCursor.current === NSCursor.arrow else { fatalError("Slider hover did not use arrow") }
@@ -676,14 +677,51 @@ func runSmokeChecks(delegate: AppDelegate) async {
         guard model.lineWidth == 18 else { fatalError("Numeric field did not commit direct input") }
         model.lineWidth = originalWidth
         checks.append("Native number input commits values and arrow keys step without navigating")
-        if let colorWell = controls.first(where: { $0 is NSColorWell }) as? NSColorWell {
-            colorWell.performClick(nil)
-            try await wait { NSColorPanel.shared.isVisible }
-            NSColorPanel.shared.close()
-            try await hover(canvas)
-            guard NSCursor.current === NSCursor.crosshair else { fatalError("Color panel close did not restore canvas cursor") }
-            checks.append("Native color picker and panel close preserve cursor behavior")
+        let colorButton = controls.first { $0 is PaletteColorButton } as! PaletteColorButton
+        colorButton.performClick(nil)
+        try await wait { colorButton.popover?.isShown == true }
+        guard let palette = colorButton.palette, palette.numberFields.count == 4 else { fatalError("Gradient palette or RGBA fields missing") }
+        palette.view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(150))
+        let originalColor = colorButton.color, originalOpacity = model.opacity
+        let rect = palette.colorBoard.selectionRect
+        let paletteWindow = palette.view.window!
+        let screenPoint = paletteWindow.convertPoint(toScreen: palette.colorBoard.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil))
+        let boardPoint = delegate.window.convertPoint(fromScreen: screenPoint)
+        mouse(.mouseMoved, at: boardPoint)
+        mouse(.leftMouseDown, at: boardPoint); mouse(.leftMouseUp, at: boardPoint)
+        do {
+            try await wait { abs(palette.colorBoard.brightness - 0.5) < 0.005 && abs(palette.colorBoard.saturation - 0.5) < 0.005 }
+        } catch {
+            let diagnostic: [String: Any] = ["frame": NSStringFromRect(paletteWindow.frame),
+                "board": NSStringFromRect(palette.colorBoard.frame), "target": NSStringFromPoint(screenPoint),
+                "mouse": NSStringFromPoint(paletteWindow.mouseLocationOutsideOfEventStream),
+                "mouseSelections": palette.colorBoard.mouseSelections, "key": paletteWindow.isKeyWindow,
+                "ignoresMouse": paletteWindow.ignoresMouseEvents,
+                "fields": palette.numberFields.map(\.stringValue), "dirty": model.isDirty]
+            try JSONSerialization.data(withJSONObject: diagnostic, options: [.prettyPrinted])
+                .write(to: output.appendingPathComponent("palette-failure.json"))
+            throw error
         }
+        guard palette.colorBoard.mouseSelections > 0 && !model.isDirty else { fatalError("Palette click reaches canvas instead of the palette") }
+        let picked = model.ink
+        let components = [picked.red * 255, picked.green * 255, picked.blue * 255, picked.alpha * 100]
+            .map { String(Int($0.rounded())) }
+        guard abs(palette.colorBoard.saturation - 0.5) < 0.005,
+              abs(palette.colorBoard.brightness - 0.5) < 0.005,
+              palette.numberFields.map(\.stringValue) == components else { fatalError("Gradient click did not update RGB fields") }
+        for (field, value) in zip(palette.numberFields, ["255", "0", "0", "40"]) {
+            field.stringValue = value
+            field.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: field))
+        }
+        guard model.ink.red > 0.95 && model.ink.green < 0.01 && model.ink.blue < 0.01 else { fatalError("Palette selection did not update brush color") }
+        guard model.opacity == 0.4 && model.ink.alpha == 0.4 else { fatalError("Palette opacity did not reach the brush") }
+        guard palette.colorBoard.saturation == 1 && palette.colorBoard.brightness == 1 else { fatalError("RGB input did not update gradient selection") }
+        colorButton.closePalette()
+        model.color = Color(nsColor: originalColor.withAlphaComponent(1)); model.opacity = originalOpacity
+        try await hover(canvas)
+        guard NSCursor.current === NSCursor.crosshair else { fatalError("Palette close did not restore canvas cursor") }
+        checks.append("Gradient and RGBA input update each other; opacity reaches brush; close restores drawing cursor")
         let a = canvas.viewport.viewPoint(from: CGPoint(x: 200, y: 220))
         let b = canvas.viewport.viewPoint(from: CGPoint(x: 600, y: 380))
         drag(a, b, canvas: canvas)
