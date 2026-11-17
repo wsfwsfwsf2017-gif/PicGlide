@@ -28,11 +28,11 @@ struct ViewerView: View {
                         .padding(.horizontal, 16).padding(.top, 40)
                         .transition(.opacity)
                 }
-                if model.frame == nil && !model.isLoading { emptyView }
-                if model.isLoading || model.isPreparingEdit || model.isSaving {
+                if model.frame == nil && !model.isLoading && !model.isCreatingCanvas { emptyView }
+                if model.isLoading || model.isPreparingEdit || model.isSaving || model.isCreatingCanvas || model.isFilling {
                     VStack(spacing: 12) {
                         ProgressView().controlSize(.small)
-                        Text(model.isSaving ? "正在保存" : model.isPreparingEdit ? "正在准备编辑" : "正在打开图片")
+                        Text(model.isSaving ? "正在保存" : model.isCreatingCanvas ? "正在创建画布" : model.isFilling ? "正在填色，Esc 可取消" : model.isPreparingEdit ? "正在准备编辑" : "正在打开图片")
                             .font(.system(size: 13)).foregroundStyle(.secondary)
                     }
                     .padding(24).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
@@ -82,17 +82,22 @@ struct ViewerView: View {
             Image(nsImage: NSApp.applicationIconImage).resizable().interpolation(.high)
                 .frame(width: 120, height: 120).accessibilityHidden(true)
             Text("PicGlide").font(.system(size: 28, weight: .medium, design: .rounded))
-            Text(model.loadingError ?? "拖入或打开图片")
+            Text(model.loadingError ?? "拖入或打开图片，也可以新建画布")
                 .font(.system(size: 13)).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center).frame(maxWidth: 390)
-            Button(action: model.openPanel) {
-                HStack(spacing: 16) {
-                    Text("打开图片").fontWeight(.medium)
-                    Text("⌘O").foregroundStyle(.white.opacity(0.8))
-                }.padding(.horizontal, 18).padding(.vertical, 10)
+            HStack(spacing: 10) {
+                Button(action: model.newCanvasPanel) {
+                    Text("新建画布").fontWeight(.medium).padding(.horizontal, 18).padding(.vertical, 10)
+                }
+                .buttonStyle(ClickableButtonStyle(prominent: true, help: "新建画布（⌘N）"))
+                .accessibilityIdentifier("file.new")
+                Button(action: model.openPanel) {
+                    Text("打开图片").fontWeight(.medium).padding(.horizontal, 18).padding(.vertical, 10)
+                }
+                .buttonStyle(ClickableButtonStyle(help: "打开图片（⌘O）"))
+                .accessibilityIdentifier("file.open")
             }
-            .buttonStyle(ClickableButtonStyle(prominent: true, help: "打开图片（⌘O）"))
-            .accessibilityIdentifier("file.open")
+            .disabled(model.isBusy)
         }
     }
 
@@ -100,7 +105,7 @@ struct ViewerView: View {
         HStack(spacing: 12) {
             Spacer().frame(width: 58)
             HStack(spacing: 8) {
-                Text(model.currentURL?.lastPathComponent ?? "")
+                Text(model.documentName)
                     .font(.system(size: 13, weight: .medium))
                     .lineLimit(1).truncationMode(.middle).layoutPriority(1)
                 if showDimensions {
@@ -170,7 +175,7 @@ struct ViewerView: View {
                     iconButton(model.redoTitle, symbol: "arrow.uturn.forward", enabled: model.canRedo,
                                help: model.pendingCrop != nil ? "先确认裁剪" : model.canRedo ? "\(model.redoTitle)（⇧⌘Z）" : "无法重做", action: model.redo)
                     separator
-                } else {
+                } else if !model.isUntitled {
                     iconButton("上一张", symbol: "chevron.left", enabled: model.index > 0 && model.canNavigate,
                                help: model.index > 0 ? "上一张（← / ↑）" : "第一张") { model.navigate(-1) }
                         .focused($focusedBrowserControl, equals: .previous)
@@ -191,7 +196,7 @@ struct ViewerView: View {
                 toolOptions.padding(.horizontal, 14).frame(height: 43)
             }
         }
-        .frame(width: model.isEditing ? (model.hasToolOptions ? 560 : 376) : 280)
+        .frame(width: model.isEditing ? (model.hasToolOptions ? 560 : 448) : model.isUntitled ? 112 : 280)
         .background(CursorRegion(cursor: .arrow, model: model))
         .background {
             if reduceTransparency {
@@ -237,6 +242,10 @@ struct ViewerView: View {
                 parameter("粗细", value: $model.lineWidth, range: 1...64, unit: "px", id: "lineWidth", sliderWidth: 54)
                 parameter("透明度", value: Binding(get: { (model.opacity * 100).rounded() }, set: { model.opacity = $0 / 100 }),
                           range: 5...100, unit: "%", id: "opacity", sliderWidth: 54)
+            case .fill:
+                Text("颜色").foregroundStyle(.secondary)
+                ColorPicker("颜色", selection: $model.color, supportsOpacity: false).labelsHidden().frame(width: 44)
+                    .accessibilityLabel("填色颜色")
             default: EmptyView()
             }
         }

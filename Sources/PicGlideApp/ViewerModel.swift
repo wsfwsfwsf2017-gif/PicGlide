@@ -5,14 +5,15 @@ import UniformTypeIdentifiers
 import PicGlideCore
 
 enum EditTool: String, CaseIterable {
-    case hand, mosaic, crop, rectangle, pencil
+    case hand, mosaic, crop, rectangle, pencil, fill, text
     var title: String {
         switch self { case .hand: "拖动"; case .mosaic: "马赛克"; case .crop: "裁剪"
-        case .rectangle: "画框"; case .pencil: "铅笔" }
+        case .rectangle: "画框"; case .pencil: "铅笔"; case .fill: "涂色"; case .text: "文字" }
     }
     var symbol: String {
         switch self { case .hand: "hand.raised"; case .mosaic: "square.grid.3x3"
-        case .crop: "crop"; case .rectangle: "rectangle"; case .pencil: "pencil.tip" }
+        case .crop: "crop"; case .rectangle: "rectangle"; case .pencil: "pencil.tip"
+        case .fill: "drop.fill"; case .text: "character.textbox" }
     }
 }
 
@@ -20,6 +21,7 @@ enum EditTool: String, CaseIterable {
 final class ViewerModel {
     var frame: RenderedImage?
     var metadata: ImageMetadata?
+    private(set) var originalBounds: CGRect?
     var currentURL: URL?
     var imageID = UUID()
     var files: [URL] = []
@@ -29,6 +31,9 @@ final class ViewerModel {
     var isLoading = false
     var isSaving = false
     var isPreparingEdit = false
+    private(set) var isCreatingCanvas = false
+    private(set) var isFilling = false
+    private var isShowingPanel = false
     var isEditing = false
     var tool: EditTool = .hand
     var color = Color(red: 0.24, green: 0.64, blue: 1)
@@ -36,6 +41,8 @@ final class ViewerModel {
     var opacity: Double = 1
     var blockSize: Double = 24
     var mosaicDiameter: Double = 20
+    private var textSize: Double = 32
+    private var textBold = false
     var isDrawing = false
     var pendingMosaicCount = 0
     var pendingCrop: CGRect?
@@ -66,20 +73,24 @@ final class ViewerModel {
     private var resolutionTask: Task<Void, Never>?
     private var hideTask: Task<Void, Never>?
     private var savedFeedbackTask: Task<Void, Never>?
+    private var fillTask: Task<RenderedImage?, Error>?
+    private var fillID = UUID()
 
     var index: Int { currentURL.flatMap { files.firstIndex(of: $0) } ?? 0 }
-    var isDirty: Bool { history.isDirty }
-    var isBusy: Bool { isSaving || isPreparingEdit }
+    var isUntitled: Bool { frame != nil && currentURL == nil }
+    var documentName: String { currentURL?.lastPathComponent ?? "未命名" }
+    var isDirty: Bool { isUntitled || history.isDirty }
+    var isBusy: Bool { isSaving || isPreparingEdit || isCreatingCanvas || isFilling || isShowingPanel }
     var needsLeaveConfirmation: Bool { isDirty || pendingCrop != nil }
     var canToggleEditing: Bool { frame != nil && !isBusy && !isDrawing && pendingMosaicCount == 0 && pendingCrop == nil }
     var canChooseTool: Bool { !isBusy && pendingCrop == nil }
-    var canNavigate: Bool { !isBusy && !isDrawing && pendingMosaicCount == 0 && pendingCrop == nil }
+    var canNavigate: Bool { currentURL != nil && !files.isEmpty && !isBusy && !isDrawing && pendingMosaicCount == 0 && pendingCrop == nil }
     var canUndo: Bool { history.canUndo && !isBusy && pendingMosaicCount == 0 && pendingCrop == nil }
     var canRedo: Bool { history.canRedo && !isBusy && pendingMosaicCount == 0 && pendingCrop == nil }
     var canSave: Bool { isDirty && !isBusy && !isDrawing && pendingMosaicCount == 0 && pendingCrop == nil }
     var canSaveCopy: Bool { frame != nil && !isBusy && !isDrawing && pendingMosaicCount == 0 && pendingCrop == nil }
-    var canRestore: Bool { frame != nil && !isBusy && (isDirty || pendingCrop != nil || isDrawing || pendingMosaicCount > 0) }
-    var hasToolOptions: Bool { isEditing && tool != .hand && tool != .crop }
+    var canRestore: Bool { frame != nil && !isBusy && (history.isDirty || pendingCrop != nil || isDrawing || pendingMosaicCount > 0) }
+    var hasToolOptions: Bool { isEditing && tool != .hand && tool != .crop && tool != .text }
     var editorPanelHeight: CGFloat { hasToolOptions ? 92 : 48 }
     var undoTitle: String { history.operationToUndo.map { "撤销" + $0.title } ?? "撤销" }
     var redoTitle: String { history.operationToRedo.map { "重做" + $0.title } ?? "重做" }
@@ -126,6 +137,7 @@ final class ViewerModel {
     }
 
     func requestOpen(_ input: URL, fillWindow: Bool = true) {
+        guard !isBusy else { NSSound.beep(); return }
         let url = input.standardizedFileURL.resolvingSymlinksInPath()
         guard ImageFormat.supports(url) else { showError(PicGlideError.unsupportedFormat); return }
         confirmLeaving { [weak self] in self?.open(url, fillWindow: fillWindow) }
@@ -153,7 +165,7 @@ final class ViewerModel {
         renderTask = nil; resolutionTask = nil; preloadTask = nil
         generation = UUID(); imageID = UUID(); cancelGestureID = UUID()
         let token = generation
-        currentURL = url; frame = nil; metadata = nil; source = nil
+        currentURL = url; frame = nil; metadata = nil; source = nil; originalBounds = nil
         savedFeedbackTask?.cancel(); savedFeedback = false
         fingerprint = nil; history = EditHistory(); pendingCrop = nil
         editRevision = 0; frameRevision = 0
@@ -166,6 +178,7 @@ final class ViewerModel {
                 let (metadata, frame, files) = try await loader.load(url)
                 guard let self, generation == token, !Task.isCancelled else { return }
                 self.metadata = metadata; self.frame = frame; self.files = files
+                originalBounds = metadata.bounds
                 fingerprint = metadata.fingerprint
                 saveFormat = ImageFormat.from(type: metadata.typeIdentifier)
                 multiFrame = metadata.frameCount > 1
@@ -219,6 +232,93 @@ final class ViewerModel {
         tool = next; cancelGestureID = UUID(); revealControls()
     }
 
+    func newCanvasPanel() {
+        guard !isBusy, pendingMosaicCount == 0 else { NSSound.beep(); return }
+        isShowingPanel = true
+        let size = NewCanvasPanel().run(for: window)
+        isShowingPanel = false
+        if let size { createCanvas(size) }
+        else { revealControls() }
+    }
+
+    func createCanvas(_ size: CanvasSize) {
+        confirmLeaving { [weak self] in self?.prepareCanvas(size) }
+    }
+
+    private func prepareCanvas(_ size: CanvasSize) {
+        isCreatingCanvas = true; revealControls()
+        Task { [weak self] in
+            do {
+                let (base, preview) = try await Task.detached(priority: .userInitiated) {
+                    let image = try size.makeImage()
+                    let preview = try ImageRenderer.render(source: image, originalBounds: size.bounds,
+                        operations: [], maxDimension: 2048)
+                    return (RenderedImage(image: image, bounds: size.bounds), preview)
+                }.value
+                guard let self else { return }
+                loadTask?.cancel(); preloadTask?.cancel(); renderTask?.cancel(); resolutionTask?.cancel()
+                savedFeedbackTask?.cancel(); canvas?.cancelPendingMosaics()
+                generation = UUID(); imageID = UUID(); cancelGestureID = UUID()
+                source = base.image; originalBounds = base.bounds; frame = preview
+                metadata = nil; currentURL = nil; files = []; fingerprint = nil; saveFormat = nil; multiFrame = false
+                history = EditHistory(); editRevision = 0; frameRevision = 0
+                pendingCrop = nil; pendingMosaicCount = 0; isDrawing = false
+                isLoading = false; isCreatingCanvas = false; loadingError = nil; savedFeedback = false
+                requestedDimension = 2048; viewportCommand = nil
+                isEditing = true; tool = .pencil; color = .black; lineWidth = 6; opacity = 1
+                textSize = 32; textBold = false
+                window?.title = "未命名 — PicGlide"; window?.isDocumentEdited = true
+                window?.makeFirstResponder(canvas); revealControls()
+            } catch {
+                guard let self else { return }
+                isCreatingCanvas = false; showError(error); revealControls()
+            }
+        }
+    }
+
+    func fill(at point: CGPoint) {
+        guard isEditing, canChooseTool, pendingMosaicCount == 0, !isDrawing,
+              let source, let originalBounds else { return }
+        let ink = Ink(red: self.ink.red, green: self.ink.green, blue: self.ink.blue)
+        let operations = history.operations, token = generation, revision = editRevision
+        let id = UUID(); fillID = id; isFilling = true; revealControls()
+        let task = Task.detached(priority: .userInitiated) {
+            let rendered = try ImageRenderer.render(source: source, originalBounds: originalBounds, operations: operations)
+            return try ImageRenderer.fillMask(in: rendered, at: point, ink: ink)
+        }
+        fillTask = task
+        Task { [weak self] in
+            do {
+                let mask = try await task.value
+                guard let self, fillID == id, generation == token, editRevision == revision, !task.isCancelled else { return }
+                fillTask = nil; isFilling = false
+                if let mask { commit(.fill(mask: mask, ink: ink)) }
+            } catch {
+                guard let self, fillID == id else { return }
+                fillTask = nil; isFilling = false
+                if !(error is CancellationError) { showError(error) }
+            }
+        }
+    }
+
+    func cancelFill() {
+        fillID = UUID(); fillTask?.cancel(); fillTask = nil; isFilling = false
+    }
+
+    func addText(at point: CGPoint) {
+        guard isEditing, canChooseTool, !isDrawing, pendingMosaicCount == 0,
+              let bounds = frame?.bounds, bounds.contains(point) else { return }
+        isShowingPanel = true; revealControls()
+        let panel = TextDrawingPanel(at: point, within: bounds, color: NSColor(color), fontSize: textSize, bold: textBold)
+        let patch = panel.run(for: window)
+        isShowingPanel = false
+        if let patch {
+            textSize = panel.fontSize; textBold = panel.bold
+            commit(.text(patch: patch))
+        }
+        window?.makeFirstResponder(canvas); revealControls()
+    }
+
     @discardableResult
     func commit(_ operation: EditOperation) -> Int? {
         guard isEditing, source != nil, !isBusy else { return nil }
@@ -269,7 +369,8 @@ final class ViewerModel {
         guard canRestore else { return }
         let alert = NSAlert()
         alert.messageText = "舍弃未保存的修改？"
-        alert.informativeText = "图片将恢复到最近一次保存的状态。已保存的内容会保留，放弃的修改无法撤销。"
+        alert.informativeText = isUntitled ? "画布将恢复到新建时的白色背景，尺寸保持不变。放弃的修改无法撤销。"
+            : "图片将恢复到最近一次保存的状态。已保存的内容会保留，放弃的修改无法撤销。"
         alert.addButton(withTitle: "取消").keyEquivalent = "\r"
         alert.addButton(withTitle: "舍弃修改").hasDestructiveAction = true
         guard alert.runModal() == .alertSecondButtonReturn else { return }
@@ -278,7 +379,7 @@ final class ViewerModel {
         savedFeedback = false
         pendingCrop = nil
         chooseTool(.hand)
-        window?.isDocumentEdited = false
+        window?.isDocumentEdited = isDirty
         renderPreview(dimension: requestedDimension)
     }
 
@@ -289,8 +390,8 @@ final class ViewerModel {
     func updateZoom(scale: CGFloat, backingScale: CGFloat) {
         let percentage = Double(scale * backingScale * 100)
         if abs(zoomPercentage - percentage) > 0.001 { zoomPercentage = percentage }
-        guard let metadata, let frame else { return }
-        let originalMax = max(metadata.pixelSize.width, metadata.pixelSize.height)
+        guard let originalBounds, let frame else { return }
+        let originalMax = max(originalBounds.width, originalBounds.height)
         let wanted = min(Int(originalMax), max(2048, Int(ceil(originalMax * min(1, scale * backingScale)))))
         let currentDimension = Int(CGFloat(max(frame.image.width, frame.image.height)) * originalMax / max(frame.bounds.width, frame.bounds.height))
         guard wanted > max(requestedDimension, currentDimension) + 64 else { return }
@@ -304,13 +405,16 @@ final class ViewerModel {
     }
 
     private func renderPreview(dimension: Int) {
-        guard let metadata, let url = currentURL else { return }
+        guard let originalBounds else { return }
         renderTask?.cancel()
-        let base = source, operations = history.operations, token = generation, revision = editRevision
+        let base = source, url = currentURL, operations = history.operations, token = generation, revision = editRevision
         let task = Task.detached(priority: .userInitiated) {
             try Task.checkCancellation()
-            let image = try base ?? ImageCodec.decode(url, maxDimension: dimension)
-            return try ImageRenderer.render(source: image, originalBounds: metadata.bounds,
+            let image: CGImage
+            if let base { image = base }
+            else if let url { image = try ImageCodec.decode(url, maxDimension: dimension) }
+            else { throw PicGlideError.invalidImage }
+            return try ImageRenderer.render(source: image, originalBounds: originalBounds,
                                              operations: operations, maxDimension: dimension)
         }
         renderTask = task
@@ -328,10 +432,10 @@ final class ViewerModel {
     }
 
     func makeMosaicPreview(blockSize: Double) async throws -> RenderedImage {
-        guard let source, let metadata else { throw PicGlideError.invalidImage }
+        guard let source, let originalBounds else { throw PicGlideError.invalidImage }
         let operations = history.operations
         let task = Task.detached(priority: .userInitiated) {
-            let frame = try ImageRenderer.render(source: source, originalBounds: metadata.bounds,
+            let frame = try ImageRenderer.render(source: source, originalBounds: originalBounds,
                                                  operations: operations, maxDimension: 2048)
             try Task.checkCancellation()
             return try RenderedImage(image: ImageRenderer.mosaicImage(frame, blockSize: blockSize), bounds: frame.bounds)
@@ -342,7 +446,8 @@ final class ViewerModel {
     }
 
     func save(asCopy: Bool = false, completion: (@MainActor (Bool) -> Void)? = nil) {
-        guard !isBusy, let url = currentURL, let metadata else { completion?(false); return }
+        guard !isBusy, frame != nil, originalBounds != nil else { completion?(false); return }
+        let url = currentURL
         guard pendingCrop == nil && !isDrawing && pendingMosaicCount == 0 else {
             let alert = NSAlert()
             alert.messageText = pendingMosaicCount > 0 ? "正在处理马赛克" : pendingCrop != nil ? "先确认裁剪" : "先结束当前绘制"
@@ -354,9 +459,7 @@ final class ViewerModel {
             showError(PicGlideError.multiFrame)
             save(asCopy: true, completion: completion); return
         }
-        var destination = url
-        var format = saveFormat ?? .png
-        if asCopy || saveFormat == nil {
+        if asCopy || saveFormat == nil || url == nil {
             let panel = NSSavePanel()
             let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 160, height: 28), pullsDown: true)
             popup.addItem(withTitle: "保存格式")
@@ -377,22 +480,37 @@ final class ViewerModel {
             panel.accessoryView = accessory
             panel.allowedContentTypes = [.png]
             panel.allowsOtherFileTypes = false
-            panel.nameFieldStringValue = url.deletingPathExtension().lastPathComponent + "-edited.png"
-            panel.directoryURL = url.deletingLastPathComponent()
-            let response = panel.runModal()
-            withExtendedLifetime(formatAction) {}
-            guard response == .OK, let selected = panel.url else { completion?(false); return }
-            format = ImageFormat.exportFormats[popup.indexOfSelectedItem - 1]
-            destination = selected.deletingPathExtension().appendingPathExtension(format.fileExtension)
-                .standardizedFileURL.resolvingSymlinksInPath()
-            // The save panel must confirm the actual path, including its extension.
-            if destination != selected, FileManager.default.fileExists(atPath: destination.path) {
-                let alert = NSAlert(); alert.messageText = "替换现有文件？"
-                alert.informativeText = destination.lastPathComponent
-                alert.addButton(withTitle: "替换"); alert.addButton(withTitle: "取消")
-                guard alert.runModal() == .alertFirstButtonReturn else { completion?(false); return }
+            panel.nameFieldStringValue = url.map { $0.deletingPathExtension().lastPathComponent + "-edited.png" } ?? "未命名.png"
+            if let url { panel.directoryURL = url.deletingLastPathComponent() }
+            isShowingPanel = true
+            let finish: @MainActor (NSApplication.ModalResponse) -> Void = { [weak self, formatAction] response in
+                guard let self else { completion?(false); return }
+                isShowingPanel = false; revealControls()
+                withExtendedLifetime(formatAction) {}
+                guard response == .OK, let selected = panel.url else { completion?(false); return }
+                let format = ImageFormat.exportFormats[popup.indexOfSelectedItem - 1]
+                let destination = selected.deletingPathExtension().appendingPathExtension(format.fileExtension)
+                    .standardizedFileURL.resolvingSymlinksInPath()
+                // The save panel must confirm the actual path, including its extension.
+                if destination != selected, FileManager.default.fileExists(atPath: destination.path) {
+                    let alert = NSAlert(); alert.messageText = "替换现有文件？"
+                    alert.informativeText = destination.lastPathComponent
+                    alert.addButton(withTitle: "替换"); alert.addButton(withTitle: "取消")
+                    guard alert.runModal() == .alertFirstButtonReturn else { completion?(false); return }
+                }
+                writeImage(to: destination, format: format, completion: completion)
             }
+            if let window { panel.beginSheetModal(for: window, completionHandler: finish) }
+            else { panel.begin(completionHandler: finish) }
+            return
         }
+        guard let url else { completion?(false); return }
+        writeImage(to: url, format: saveFormat ?? .png, completion: completion)
+    }
+
+    private func writeImage(to destination: URL, format: ImageFormat, completion: (@MainActor (Bool) -> Void)?) {
+        guard !isBusy, canSaveCopy, let originalBounds else { completion?(false); return }
+        let url = currentURL
         if destination == url && multiFrame {
             showError(PicGlideError.multiFrame); completion?(false); return
         }
@@ -404,9 +522,12 @@ final class ViewerModel {
         Task { [weak self, loader] in
             do {
                 let (savedFingerprint, original) = try await Task.detached(priority: .userInitiated) {
-                    let original = try base ?? ImageCodec.decode(url,
-                        maxDimension: Int(max(metadata.pixelSize.width, metadata.pixelSize.height)))
-                    let rendered = try ImageRenderer.render(source: original, originalBounds: metadata.bounds, operations: operations)
+                    let original: CGImage
+                    if let base { original = base }
+                    else if let url { original = try ImageCodec.decode(url,
+                        maxDimension: Int(max(originalBounds.width, originalBounds.height))) }
+                    else { throw PicGlideError.invalidImage }
+                    let rendered = try ImageRenderer.render(source: original, originalBounds: originalBounds, operations: operations)
                     let fingerprint = try ImageFiles.save(image: rendered.image, format: selectedFormat, to: target, expected: expected)
                     return (fingerprint, original)
                 }.value
@@ -422,7 +543,7 @@ final class ViewerModel {
                 }
                 window?.isDocumentEdited = false
                 window?.title = target.lastPathComponent + " — PicGlide"
-                if target.deletingLastPathComponent() != url.deletingLastPathComponent() {
+                if target.deletingLastPathComponent() != url?.deletingLastPathComponent() {
                     files = (try? await Task.detached {
                         try ImageFiles.images(in: target.deletingLastPathComponent())
                     }.value) ?? [target]
@@ -452,8 +573,8 @@ final class ViewerModel {
             if alert.runModal() == .alertSecondButtonReturn { action() }
             return
         }
-        alert.messageText = "保存对图片的修改？"
-        alert.informativeText = currentURL?.lastPathComponent ?? "当前图片"
+        alert.messageText = isUntitled ? "保存这个画布？" : "保存对图片的修改？"
+        alert.informativeText = documentName
         alert.addButton(withTitle: "保存"); alert.addButton(withTitle: "不保存"); alert.addButton(withTitle: "取消")
         switch alert.runModal() {
         case .alertFirstButtonReturn: save { success in if success { action() } }
@@ -472,7 +593,8 @@ final class ViewerModel {
 
 private extension EditOperation {
     var title: String {
-        switch self { case .crop: "裁剪"; case .mosaic: "马赛克"; case .rectangle: "画框"; case .pencil: "铅笔" }
+        switch self { case .crop: "裁剪"; case .mosaic: "马赛克"; case .rectangle: "画框"; case .pencil: "铅笔"
+        case .fill: "涂色"; case .text: "文字" }
     }
 }
 

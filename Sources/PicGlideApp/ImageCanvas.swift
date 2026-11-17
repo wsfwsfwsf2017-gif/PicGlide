@@ -80,6 +80,8 @@ final class CanvasView: NSView {
             }
             if let command = model.viewportCommand, zoomCommandID != command.id {
                 zoomCommandID = command.id
+                // An explicit zoom command takes precedence over preserving the previous tool row's position.
+                workspaceHeight = model.isEditing ? model.editorPanelHeight + 20 : 0
                 fitMode = !command.actualSize
                 if fitMode { viewport.fit(inset: 12) }
                 else { viewport.scale = 1 / (window?.backingScaleFactor ?? 2); viewport.pan = .zero }
@@ -127,6 +129,7 @@ final class CanvasView: NSView {
         if model.frame == nil || model.isBusy { return .arrow }
         if isPanning { return .closedHand }
         if !model.isEditing || model.tool == .hand || spaceHeld { return .openHand }
+        if model.tool == .text { return .iBeam }
         if model.tool == .crop, let adjustment = cropAdjustment ?? pointer.flatMap(cropHit) {
             switch adjustment {
             case .move: return dragStart == nil ? .openHand : .closedHand
@@ -159,6 +162,7 @@ final class CanvasView: NSView {
 
     var canvasCursorRects: [NSRect] {
         let area = visibleRect.intersection(bounds)
+        guard !area.isEmpty else { return [] }
         guard let root = window?.contentView else { return [area] }
         let exclusions = CursorRegionView.regions(in: root).map { convert($0.cursorRect, from: $0) }
             .sorted { $0.width * $0.height > $1.width * $1.height }
@@ -385,6 +389,13 @@ final class CanvasView: NSView {
         let point = convert(event.locationInWindow, from: nil)
         pointer = point
         isPanning = !model.isEditing || model.tool == .hand || spaceHeld
+        if !isPanning, model.tool == .fill || model.tool == .text {
+            guard viewport.imageRect.contains(point) else { return }
+            let imagePoint = viewport.imagePoint(from: point)
+            if model.tool == .fill { model.fill(at: imagePoint) }
+            else { model.addText(at: imagePoint) }
+            return
+        }
         guard isPanning || model.tool == .mosaic || model.pendingMosaicCount == 0 else { return }
         if isPanning {
             dragStart = point; dragPan = viewport.pan; NSCursor.closedHand.set()
@@ -464,7 +475,7 @@ final class CanvasView: NSView {
                 if let selection, selection.width >= 1, selection.height >= 1 {
                     model.commit(.rectangle(selection, ink: model.ink, width: model.lineWidth))
                 }
-            case .hand: break
+            case .hand, .fill, .text: break
             }
         }
         clearGesture()
@@ -487,6 +498,7 @@ final class CanvasView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53, model.isFilling { model.cancelFill(); return }
         guard !model.isBusy else { return }
         model.revealControls()
         switch event.keyCode {

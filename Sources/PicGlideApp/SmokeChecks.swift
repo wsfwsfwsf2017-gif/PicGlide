@@ -594,6 +594,11 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try await wait { !model.isLoading && model.currentURL == fixture }
         model.setZoom(actualSize: false)
         canvas.update()
+        try await wait {
+            cursorRegions(in: delegate.window.contentView!).contains {
+                $0.helpText == "展开编辑工具（⌘E）" && !$0.cursorRect.isEmpty && $0.window === delegate.window
+            }
+        }
         let editButton = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == "展开编辑工具（⌘E）" }!
         let positionBeforeClick = canvas.convert(canvas.viewport.viewPoint(from: canvas.viewport.imageBounds.origin), to: nil)
         let scaleBeforeClick = canvas.viewport.scale
@@ -829,7 +834,10 @@ func runSmokeChecks(delegate: AppDelegate) async {
         let lockedTools = cursorRegions(in: root).filter {
             $0.helpText == "先确认裁剪" && abs($0.cursorRect.width - 32) < 0.5
         }.sorted { $0.convert(.zero, to: nil).x < $1.convert(.zero, to: nil).x }
-        guard lockedTools.count == 7 else { fatalError("Pending crop leaves tool or history buttons enabled") }
+        guard lockedTools.count == EditTool.allCases.count + 2,
+              lockedTools.allSatisfy({ $0.cursor === NSCursor.arrow }) else {
+            fatalError("Pending crop leaves tool or history buttons enabled")
+        }
         try await hover(lockedTools[4])
         let toolPoint = lockedTools[4].convert(NSPoint(x: 16, y: 16), to: nil)
         mouse(.leftMouseDown, at: toolPoint); mouse(.leftMouseUp, at: toolPoint)

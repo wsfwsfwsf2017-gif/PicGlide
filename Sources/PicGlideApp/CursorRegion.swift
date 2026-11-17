@@ -62,7 +62,10 @@ struct CursorRegion: NSViewRepresentable {
 final class CursorRegionView: NSView {
     var cursor: NSCursor = .arrow
     var helpText = ""
-    var cursorRect: NSRect { visibleRect.intersection(bounds) }
+    var cursorRect: NSRect {
+        let rect = visibleRect.intersection(bounds)
+        return rect.isEmpty ? .zero : rect
+    }
     private weak var model: ViewerModel?
     var tooltipText: String {
         !helpText.isEmpty && (window as? PicGlideWindow)?.model?.isBusy == true
@@ -76,7 +79,11 @@ final class CursorRegionView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    override func resetCursorRects() { addCursorRect(cursorRect, cursor: cursor) }
+    override func resetCursorRects() {
+        // Transitions can leave a view with no visible area; AppKit rejects empty cursor rectangles.
+        let rect = cursorRect
+        if !rect.isEmpty { addCursorRect(rect, cursor: cursor) }
+    }
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         if newWindow !== window { (window as? PicGlideWindow)?.hideTooltip() }
         super.viewWillMove(toWindow: newWindow)

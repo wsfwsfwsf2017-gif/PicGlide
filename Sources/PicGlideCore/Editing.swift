@@ -23,6 +23,8 @@ public enum EditOperation: Equatable, Sendable {
     case mosaic([CGPoint], diameter: Double, blockSize: Double, patch: RenderedImage)
     case rectangle(CGRect, ink: Ink, width: Double)
     case pencil([CGPoint], ink: Ink, width: Double)
+    case fill(mask: RenderedImage, ink: Ink)
+    case text(patch: RenderedImage)
 }
 
 public struct EditHistory: Sendable {

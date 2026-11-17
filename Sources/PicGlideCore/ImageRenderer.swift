@@ -118,6 +118,15 @@ public enum ImageRenderer {
             let context = try context(width: image.width, height: image.height)
             context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
             switch operation {
+            case let .fill(mask, ink):
+                let rect = localRect(mask.bounds)
+                let target = CGRect(x: rect.minX, y: CGFloat(image.height) - rect.maxY, width: rect.width, height: rect.height)
+                context.clip(to: target, mask: mask.image)
+                context.setFillColor(ink.cgColor); context.fill(target)
+            case let .text(patch):
+                let rect = localRect(patch.bounds)
+                context.draw(patch.image, in: CGRect(x: rect.minX, y: CGFloat(image.height) - rect.maxY,
+                    width: rect.width, height: rect.height))
             case let .mosaic(points, diameter, blockSize, patch):
                 guard diameter.isFinite, diameter > 0,
                       blockSize.isFinite, blockSize > 0, !patch.bounds.isEmpty,

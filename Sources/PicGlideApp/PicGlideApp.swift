@@ -62,7 +62,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if model.currentURL == nil, let argument = CommandLine.arguments.dropFirst().first,
            !argument.hasPrefix("-") { model.requestOpen(URL(fileURLWithPath: argument)) }
         #if DEBUG
-        if let path = ProcessInfo.processInfo.environment["PICGLIDE_LAYOUT_OUTPUT"] {
+        if let path = ProcessInfo.processInfo.environment["PICGLIDE_DRAWING_OUTPUT"] {
+            Task { await runDrawingChecks(delegate: self, output: URL(fileURLWithPath: path)) }
+        } else if let path = ProcessInfo.processInfo.environment["PICGLIDE_LAYOUT_OUTPUT"] {
             Task { await runLayoutChecks(delegate: self, output: URL(fileURLWithPath: path)) }
         } else if ProcessInfo.processInfo.environment["PICGLIDE_SMOKE_OUTPUT"] != nil {
             Task { await runSmokeChecks(delegate: self) }
@@ -147,6 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let quit = NSMenuItem(title: "退出 PicGlide", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         quit.target = NSApp; app.addItem(quit)
         let file = menu("文件")
+        item(file, "新建画布…", #selector(newCanvas), "n")
         item(file, "打开图片…", #selector(openImage), "o")
         file.addItem(.separator())
         item(file, "保存", #selector(saveImage), "s")
@@ -157,6 +160,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let edit = menu("编辑")
         item(edit, "撤销", #selector(undoEdit), "z")
         item(edit, "重做", #selector(redoEdit), "z", shift: true)
+        edit.addItem(.separator())
+        for (title, action, key) in [("剪切", #selector(NSText.cut(_:)), "x"),
+                                     ("拷贝", #selector(NSText.copy(_:)), "c"),
+                                     ("粘贴", #selector(NSText.paste(_:)), "v"),
+                                     ("全选", #selector(NSText.selectAll(_:)), "a")] {
+            let entry = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            edit.addItem(entry)
+        }
         edit.addItem(.separator())
         item(edit, "显示编辑工具", #selector(toggleEdit), "e")
         let view = menu("显示")
@@ -174,10 +185,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(undoEdit):
-            if let editor = window?.firstResponder as? NSTextView { menuItem.title = "撤销输入"; return editor.undoManager?.canUndo == true }
+            if let editor = NSApp.keyWindow?.firstResponder as? NSTextView { menuItem.title = "撤销输入"; return editor.undoManager?.canUndo == true }
             menuItem.title = model.undoTitle; return model.canUndo
         case #selector(redoEdit):
-            if let editor = window?.firstResponder as? NSTextView { menuItem.title = "重做输入"; return editor.undoManager?.canRedo == true }
+            if let editor = NSApp.keyWindow?.firstResponder as? NSTextView { menuItem.title = "重做输入"; return editor.undoManager?.canRedo == true }
             menuItem.title = model.redoTitle; return model.canRedo
         case #selector(saveImage): return model.canSave
         case #selector(saveCopy): return model.canSaveCopy
@@ -194,15 +205,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     @objc func openImage() { model.openPanel() }
+    @objc func newCanvas() { model.newCanvasPanel() }
     @objc func saveImage() { model.save() }
     @objc func saveCopy() { model.save(asCopy: true) }
     @objc func restoreImage() { model.restoreEdits() }
     @objc func undoEdit() {
-        if let editor = window.firstResponder as? NSTextView { editor.undoManager?.undo() }
+        if let editor = NSApp.keyWindow?.firstResponder as? NSTextView { editor.undoManager?.undo() }
         else { model.undo() }
     }
     @objc func redoEdit() {
-        if let editor = window.firstResponder as? NSTextView { editor.undoManager?.redo() }
+        if let editor = NSApp.keyWindow?.firstResponder as? NSTextView { editor.undoManager?.redo() }
         else { model.redo() }
     }
     @objc func toggleEdit() { model.toggleEditing() }
