@@ -89,8 +89,13 @@ func runLayoutChecks(delegate: AppDelegate, output: URL) async {
             NSGraphicsContext.restoreGraphicsState()
             try bitmap.representation(using: .png, properties: [:])!.write(to: fixture)
         }
+        // An idle check should not observe mouse traffic in the user's working window.
+        if let screen = NSScreen.screens.first(where: { !$0.frame.contains(NSEvent.mouseLocation) }) {
+            window.setFrame(screen.visibleFrame.insetBy(dx: 40, dy: 40), display: true)
+        }
         model.requestOpen(fixture)
-        try await wait { model.frame != nil && !model.isLoading }
+        try await wait { model.frame != nil && !model.isLoading && window.isKeyWindow && model.toolbarCursorRegion != nil }
+        try await Task.sleep(for: .milliseconds(200))
         let idleCanvas = model.canvas!
         func canvasMouse(_ type: NSEvent.EventType, at point: NSPoint) {
             let event = NSEvent.mouseEvent(with: type,
@@ -100,41 +105,14 @@ func runLayoutChecks(delegate: AppDelegate, output: URL) async {
             if type == .leftMouseDown { idleCanvas.mouseDown(with: event) }
             else { idleCanvas.mouseUp(with: event) }
         }
-        model.toggleEditing(); try await wait { model.isEditing && !model.isPreparingEdit }
-        try await Task.sleep(for: .milliseconds(150))
-        model.setZoom(actualSize: false); idleCanvas.update()
-        let textScale = idleCanvas.viewport.scale, textPan = idleCanvas.viewport.pan
-        model.chooseTool(.text)
-        model.chooseTool(.text)
-        guard model.tool == .text, model.textDraft == nil, !model.isDirty else {
-            throw NSError(domain: "LayoutChecks", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Selecting the text tool opens an editor before the canvas click"])
-        }
-        let margin = CGPoint(x: 2, y: 2)
-        canvasMouse(.leftMouseDown, at: margin); canvasMouse(.leftMouseUp, at: margin)
-        precondition(model.textDraft == nil && idleCanvas.canvasCursor === NSCursor.arrow,
-                     "Clicking the margin starts text input")
-        let imageRect = idleCanvas.viewport.imageRect
-        for fraction in [0.2, 0.65] {
-            let point = CGPoint(x: imageRect.minX + imageRect.width * fraction, y: imageRect.minY + imageRect.height * fraction)
-            let expected = idleCanvas.viewport.imagePoint(from: point)
-            canvasMouse(.leftMouseDown, at: point); canvasMouse(.leftMouseUp, at: point)
-            guard let draft = model.textDraft, let editor = idleCanvas.textEditor else { preconditionFailure("Image click does not open text input") }
-            precondition(hypot(draft.origin.x - expected.x, draft.origin.y - expected.y) < 0.01 && window.firstResponder === editor.input,
-                         "Text input is not anchored at the click or does not accept typing")
-            model.cancelTextDraft()
-        }
-        precondition(!model.isDirty && idleCanvas.viewport.scale == textScale && idleCanvas.viewport.pan == textPan)
-        model.toggleEditing()
-        try await Task.sleep(for: .milliseconds(150))
-        model.setZoom(actualSize: false); idleCanvas.update()
-        records.append(["scenario": "text tool waits for clicks on the image and opens focused input at the chosen point without moving the viewport"])
         let idleScale = idleCanvas.viewport.scale, idlePan = idleCanvas.viewport.pan
         let oldToolbar = idleCanvas.convert(model.toolbarCursorRegion!.cursorRect, from: model.toolbarCursorRegion!)
         window.makeFirstResponder(nil)
         model.toolbarHovered = false; model.revealControls()
+        let idlePointer = window.mouseLocationOutsideOfEventStream
         try await Task.sleep(for: .milliseconds(2300))
-        precondition(!model.controlsVisible, "Browser controls stay visible after focus leaves the canvas")
+        precondition(!model.controlsVisible,
+                     "Browser controls stay visible after focus leaves the canvas: hover=\(model.toolbarHovered), focus=\(model.toolbarFocused), menu=\(model.toolbarMenuTracking), pointer=\(idlePointer) to \(window.mouseLocationOutsideOfEventStream)")
         precondition(model.toolbarCursorRegion == nil && idleCanvas.canvasCursorRects.contains {
             $0.contains(NSPoint(x: oldToolbar.midX, y: oldToolbar.midY))
         }, "Hidden controls leave a cursor exclusion on the canvas")
@@ -200,6 +178,65 @@ func runLayoutChecks(delegate: AppDelegate, output: URL) async {
         precondition(model.controlsVisible && model.toolbarCursorRegion != nil, "Editing controls auto-hide")
         records.append(["scenario": "editing controls remain visible"])
 
+        model.setZoom(actualSize: false); idleCanvas.update()
+        let textScale = idleCanvas.viewport.scale, textPan = idleCanvas.viewport.pan
+        model.chooseTool(.text)
+        model.chooseTool(.text)
+        guard model.tool == .text, model.textDraft == nil, !model.isDirty else {
+            throw NSError(domain: "LayoutChecks", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Selecting the text tool opens an editor before the canvas click"])
+        }
+        let margin = CGPoint(x: 2, y: 2)
+        canvasMouse(.leftMouseDown, at: margin); canvasMouse(.leftMouseUp, at: margin)
+        precondition(model.textDraft == nil && idleCanvas.canvasCursor === NSCursor.arrow,
+                     "Clicking the margin starts text input")
+        func click(_ point: CGPoint, count: Int = 1) {
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                window.sendEvent(NSEvent.mouseEvent(with: type, location: idleCanvas.convert(point, to: nil),
+                    modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 1, clickCount: count, pressure: 1)!)
+            }
+        }
+        let imageRect = idleCanvas.viewport.imageRect
+        let first = CGPoint(x: imageRect.minX + imageRect.width * 0.2, y: imageRect.minY + imageRect.height * 0.2)
+        let next = CGPoint(x: imageRect.midX, y: imageRect.midY)
+        let last = CGPoint(x: imageRect.midX, y: imageRect.minY + imageRect.height * 0.75)
+        let footer = idleCanvas.convert(CGPoint(x: 12, y: 32), from: nil)
+        var textFailures: [String] = []
+        for (index, (point, blank)) in [(first, next), (next, margin), (last, footer)].enumerated() {
+            let expected = idleCanvas.viewport.imagePoint(from: point)
+            click(point, count: index == 1 ? 2 : 1)
+            guard let draft = model.textDraft, let editor = idleCanvas.textEditor else { preconditionFailure("Image click does not open text input") }
+            precondition(hypot(draft.origin.x - expected.x, draft.origin.y - expected.y) < 0.01 && window.firstResponder === editor.input,
+                         "Text input is not anchored at the click or does not accept typing")
+            let content = "文字 \(index + 1)"
+            let replaceSelection = NSRange(location: NSNotFound, length: 0)
+            if index == 1 {
+                editor.input.setMarkedText(content, selectedRange: NSRange(location: content.utf16.count, length: 0),
+                    replacementRange: replaceSelection)
+                precondition(editor.input.hasMarkedText())
+            } else {
+                editor.input.insertText(content, replacementRange: replaceSelection)
+            }
+            click(blank)
+            if model.textDraft != nil || idleCanvas.textEditor != nil {
+                textFailures.append("Click away left the input open at placement \(index + 1), marked=\(editor.input.hasMarkedText()), error=\(model.textError ?? "none")")
+                model.cancelTextDraft()
+            } else if model.textOverlay.annotations[draft.id]?.content != content ||
+                model.textOverlay.annotations[draft.id]?.patch.bounds.origin != CGPoint(x: expected.x.rounded(), y: expected.y.rounded()) ||
+                model.selectedTextID != nil || model.tool != .text {
+                textFailures.append("Click away did not leave unselected text in place with the tool active at placement \(index + 1)")
+            }
+        }
+        guard textFailures.isEmpty else {
+            throw NSError(domain: "LayoutChecks", code: 3, userInfo: [NSLocalizedDescriptionKey: textFailures.joined(separator: " / ")])
+        }
+        precondition(model.history.operations.count == 3)
+        for _ in 0..<3 { model.undo() }
+        try await wait { model.frameRevision == model.editRevision }
+        precondition(!model.isDirty && idleCanvas.viewport.scale == textScale && idleCanvas.viewport.pan == textPan)
+        model.chooseTool(.hand)
+        records.append(["scenario": "window clicks place multiple text annotations without switching tools; image, margin and footer clicks commit and deselect, including marked text"])
         let originalFile = try Data(contentsOf: fixture)
         model.commit(.rectangle(CGRect(x: 50, y: 60, width: 100, height: 80), ink: model.ink, width: 4))
         model.commit(.rectangle(CGRect(x: 200, y: 200, width: 80, height: 70), ink: model.ink, width: 3))

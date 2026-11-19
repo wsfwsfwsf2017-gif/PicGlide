@@ -259,7 +259,9 @@ func runDrawingChecks(delegate: AppDelegate, output: URL) async {
         precondition(model.textDraft?.id == annotationID && canvas.textEditor?.input.string == originalText.content)
         canvas.textEditor?.input.insertText("！", replacementRange: NSRange(location: NSNotFound, length: 0))
         gesture(.leftMouseDown, at: CGPoint(x: 700, y: 500))
-        precondition(model.selectedText?.content == originalText.content + "！" && model.textDraft == nil)
+        precondition(model.textOverlay.annotations[annotationID]?.content == originalText.content + "！" &&
+            model.textDraft == nil && model.selectedTextID == nil && model.tool == .text)
+        gesture(.leftMouseDown, at: end); gesture(.leftMouseUp, at: end)
         key(51, to: canvas)
         precondition(model.textOverlay.annotations[annotationID] == nil)
         model.undo()

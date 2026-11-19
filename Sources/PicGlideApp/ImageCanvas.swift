@@ -453,7 +453,7 @@ final class CanvasView: NSView {
     override func mouseDown(with event: NSEvent) {
         guard model.frame != nil, !model.isBusy else { return }
         if model.textDraft != nil {
-            model.finishTextDraft()
+            model.finishTextAtBlankClick()
             return
         }
         window?.makeFirstResponder(self); model.revealControls()

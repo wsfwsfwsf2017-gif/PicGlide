@@ -314,14 +314,21 @@ final class PicGlideWindow: NSWindow {
             hideTooltip()
         default: break
         }
-        if event.type == .leftMouseDown, isHeaderLocation(event.locationInWindow) {
-            if event.clickCount.isMultiple(of: 2) {
-                toggleScreenFill()
-                return
+        if event.type == .leftMouseDown {
+            let point = event.locationInWindow
+            if isHeaderLocation(point) {
+                if event.clickCount.isMultiple(of: 2) { toggleScreenFill(); return }
+                if !styleMask.contains(.fullScreen) { performDrag(with: event); return }
             }
-            if !styleMask.contains(.fullScreen) {
-                performDrag(with: event)
-                return
+            if let model, !model.isBusy, let canvas = model.canvas, let editor = canvas.textEditor, let contentView {
+                let canvasPoint = canvas.convert(point, from: nil)
+                // Finish before AppKit can consume a click in the workspace to end input-method composition.
+                if canvasPoint.y >= canvas.bounds.minY, !editor.frame.contains(canvasPoint),
+                   contentView.convert(contentView.bounds, to: nil).contains(point),
+                   CursorRegionView.region(at: point, in: contentView) == nil {
+                    model.finishTextAtBlankClick()
+                    return
+                }
             }
         }
         super.sendEvent(event)

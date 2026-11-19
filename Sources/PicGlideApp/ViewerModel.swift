@@ -404,6 +404,17 @@ final class ViewerModel {
         textStylePreview = nil
     }
 
+    func finishTextAtBlankClick() {
+        if let input = canvas?.textEditor?.input, input.hasMarkedText() {
+            input.unmarkText()
+            input.inputContext?.discardMarkedText()
+            updateTextContent(input.string)
+        }
+        guard finishTextDraft() else { return }
+        selectedTextID = nil
+        canvas?.needsDisplay = true
+    }
+
     @discardableResult
     func finishTextDraft() -> Bool {
         finishTextStyle()

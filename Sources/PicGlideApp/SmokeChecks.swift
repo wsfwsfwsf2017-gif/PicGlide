@@ -510,10 +510,31 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try await wait { canvas.textEditor?.input === delegate.window.firstResponder }
         let placed = canvas.viewport.viewPoint(from: model.textDraft!.origin)
         guard hypot(placed.x - insertion.x, placed.y - insertion.y) < 2 else { fatalError("Text input is not at the click location") }
-        canvas.textEditor?.input.insertText("画布文字 / PicGlide", replacementRange: NSRange(location: NSNotFound, length: 0))
+        let firstID = model.textDraft!.id
+        let replaceSelection = NSRange(location: NSNotFound, length: 0)
+        canvas.textEditor?.input.insertText("画布文字 / PicGlide", replacementRange: replaceSelection)
         try capture("text-inline-editor")
-        guard model.finishTextDraft(), let annotation = model.selectedText, let id = model.selectedTextID else {
-            fatalError("Canvas text input does not create inline annotation")
+        let next = CGPoint(x: imageRect.midX, y: imageRect.minY + imageRect.height * 0.65)
+        let nextTarget = canvas.convert(next, to: nil)
+        mouse(.leftMouseDown, at: nextTarget); mouse(.leftMouseUp, at: nextTarget)
+        try await wait { model.textDraft == nil && canvas.textEditor == nil }
+        guard let annotation = model.textOverlay.annotations[firstID], annotation.content == "画布文字 / PicGlide",
+              model.selectedTextID == nil, model.tool == .text else {
+            fatalError("Clicking blank image did not commit and deselect the first annotation")
+        }
+        mouse(.leftMouseDown, at: nextTarget, clicks: 2); mouse(.leftMouseUp, at: nextTarget, clicks: 2)
+        try await wait { model.textDraft != nil && canvas.textEditor?.input === delegate.window.firstResponder }
+        let second = model.textDraft!
+        let secondPosition = canvas.viewport.viewPoint(from: second.origin)
+        guard second.id != firstID, hypot(secondPosition.x - next.x, secondPosition.y - next.y) < 2 else {
+            fatalError("The next blank click does not start a new annotation at its location")
+        }
+        canvas.textEditor?.input.insertText("下一段", replacementRange: replaceSelection)
+        let margin = canvas.convert(CGPoint(x: 2, y: 2), to: nil)
+        mouse(.leftMouseDown, at: margin); mouse(.leftMouseUp, at: margin)
+        try await wait { model.textDraft == nil }
+        guard model.textOverlay.annotations[second.id]?.content == "下一段", model.tool == .text else {
+            fatalError("Second blank click does not finish text with the tool still active")
         }
         let old = annotation.patch.bounds
         let textPoint = canvas.convert(canvas.viewport.viewPoint(from: CGPoint(x: old.midX, y: old.midY)), to: nil)
@@ -521,25 +542,25 @@ func runSmokeChecks(delegate: AppDelegate) async {
         let panBeforeTextDrag = canvas.viewport.pan
         mouse(.mouseMoved, at: textPoint)
         mouse(.leftMouseDown, at: textPoint)
-        try await wait { canvas.hasActiveGesture && model.selectedTextID == id }
+        try await wait { canvas.hasActiveGesture && model.selectedTextID == firstID }
         mouse(.leftMouseDragged, at: movePoint); mouse(.leftMouseUp, at: movePoint)
-        try await wait { !canvas.hasActiveGesture && model.history.operations.count == operationCount + 2 }
+        try await wait { !canvas.hasActiveGesture && model.history.operations.count == operationCount + 3 }
         guard let moved = model.selectedText?.patch.bounds, moved.minX < old.minX, moved.minY < old.minY,
               canvas.viewport.pan == panBeforeTextDrag else { fatalError("Dragging text pans image or does not move text") }
         mouse(.leftMouseDown, at: movePoint, clicks: 2); mouse(.leftMouseUp, at: movePoint, clicks: 2)
-        try await wait { model.textDraft?.id == id }
+        try await wait { model.textDraft?.id == firstID }
         guard canvas.textEditor?.input.string == annotation.content else { fatalError("Double click does not restore text for editing") }
         canvas.textEditor?.input.insertText("！", replacementRange: NSRange(location: NSNotFound, length: 0))
         model.save()
         try await wait { !model.isSaving && !model.isDirty }
-        guard model.textOverlay.annotations[id]?.content == annotation.content + "！" else { fatalError("Save lost in-progress text") }
+        guard model.textOverlay.annotations[firstID]?.content == annotation.content + "！" else { fatalError("Save lost in-progress text") }
         try capture("text-dragged-and-saved")
         model.navigate(1)
         try await wait { !model.isLoading && model.currentURL != fixture }
         model.navigate(-1)
         try await wait { !model.isLoading && model.currentURL == fixture }
         guard model.textOverlay.annotations.isEmpty else { fatalError("Reopening retains in-session annotation data") }
-        checks.append("Native text button selects the tool; clicking the image places focused input; dragging, double click, save and reopen work")
+        checks.append("Native text clicks place and commit consecutive annotations while the tool stays active; dragging, double click, save and reopen work")
     }
     do {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
