@@ -250,17 +250,11 @@ final class ViewerModel {
     }
 
     func chooseTool(_ next: EditTool) {
-        guard canChooseTool, finishTextDraft() else { return }
+        guard canChooseTool else { return }
+        if next == .text, textDraft != nil { canvas?.focusTextInput(); return }
+        guard finishTextDraft() else { return }
         if next != tool { selectedTextID = nil }
         tool = next; cancelGestureID = UUID(); revealControls()
-    }
-
-    func activateTool(_ next: EditTool) {
-        guard next == .text else { chooseTool(next); return }
-        if textDraft != nil { canvas?.focusTextInput(); return }
-        guard isEditing, canChooseTool, !isDrawing, pendingMosaicCount == 0 else { return }
-        if canvas?.visibleImageCenter == nil { setZoom(actualSize: false); canvas?.update() }
-        if let point = canvas?.visibleImageCenter { beginText(at: point) }
     }
 
     func newCanvasPanel() {

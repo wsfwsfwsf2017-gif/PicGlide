@@ -174,12 +174,13 @@ struct ViewerView: View {
         HStack(spacing: 4) {
             if model.isEditing {
                 ForEach([EditTool.hand, .pencil, .rectangle, .text, .mosaic, .crop, .fill], id: \.self) { tool in
-                    Button { model.activateTool(tool) } label: {
+                    let help = tool == .text ? "点击图片添加文字" : tool.title
+                    Button { model.chooseTool(tool) } label: {
                         Image(systemName: tool.symbol).font(.system(size: 15, weight: .medium))
                             .frame(width: 32, height: 32)
                     }
                     .buttonStyle(ClickableButtonStyle(selected: model.tool == tool,
-                        help: model.pendingCrop != nil ? "先确认裁剪" : tool.title))
+                        help: model.pendingCrop != nil ? "先确认裁剪" : help))
                     .disabled(!model.canChooseTool)
                     .accessibilityLabel(tool.title).accessibilityIdentifier("tool.\(tool.rawValue)")
                     .accessibilityAddTraits(model.tool == tool ? .isSelected : [])

@@ -92,6 +92,43 @@ func runLayoutChecks(delegate: AppDelegate, output: URL) async {
         model.requestOpen(fixture)
         try await wait { model.frame != nil && !model.isLoading }
         let idleCanvas = model.canvas!
+        func canvasMouse(_ type: NSEvent.EventType, at point: NSPoint) {
+            let event = NSEvent.mouseEvent(with: type,
+                location: idleCanvas.convert(point, to: nil),
+                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+            if type == .leftMouseDown { idleCanvas.mouseDown(with: event) }
+            else { idleCanvas.mouseUp(with: event) }
+        }
+        model.toggleEditing(); try await wait { model.isEditing && !model.isPreparingEdit }
+        try await Task.sleep(for: .milliseconds(150))
+        model.setZoom(actualSize: false); idleCanvas.update()
+        let textScale = idleCanvas.viewport.scale, textPan = idleCanvas.viewport.pan
+        model.chooseTool(.text)
+        model.chooseTool(.text)
+        guard model.tool == .text, model.textDraft == nil, !model.isDirty else {
+            throw NSError(domain: "LayoutChecks", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Selecting the text tool opens an editor before the canvas click"])
+        }
+        let margin = CGPoint(x: 2, y: 2)
+        canvasMouse(.leftMouseDown, at: margin); canvasMouse(.leftMouseUp, at: margin)
+        precondition(model.textDraft == nil && idleCanvas.canvasCursor === NSCursor.arrow,
+                     "Clicking the margin starts text input")
+        let imageRect = idleCanvas.viewport.imageRect
+        for fraction in [0.2, 0.65] {
+            let point = CGPoint(x: imageRect.minX + imageRect.width * fraction, y: imageRect.minY + imageRect.height * fraction)
+            let expected = idleCanvas.viewport.imagePoint(from: point)
+            canvasMouse(.leftMouseDown, at: point); canvasMouse(.leftMouseUp, at: point)
+            guard let draft = model.textDraft, let editor = idleCanvas.textEditor else { preconditionFailure("Image click does not open text input") }
+            precondition(hypot(draft.origin.x - expected.x, draft.origin.y - expected.y) < 0.01 && window.firstResponder === editor.input,
+                         "Text input is not anchored at the click or does not accept typing")
+            model.cancelTextDraft()
+        }
+        precondition(!model.isDirty && idleCanvas.viewport.scale == textScale && idleCanvas.viewport.pan == textPan)
+        model.toggleEditing()
+        try await Task.sleep(for: .milliseconds(150))
+        model.setZoom(actualSize: false); idleCanvas.update()
+        records.append(["scenario": "text tool waits for clicks on the image and opens focused input at the chosen point without moving the viewport"])
         let idleScale = idleCanvas.viewport.scale, idlePan = idleCanvas.viewport.pan
         let oldToolbar = idleCanvas.convert(model.toolbarCursorRegion!.cursorRect, from: model.toolbarCursorRegion!)
         window.makeFirstResponder(nil)
@@ -148,18 +185,11 @@ func runLayoutChecks(delegate: AppDelegate, output: URL) async {
                      "Closing a menu does not resume idle hiding: visible=\(model.controlsVisible), tracking=\(model.toolbarMenuTracking), hover=\(model.toolbarHovered), focus=\(model.toolbarFocused)")
         records.append(["scenario": "nested menu tracking protects controls and closing resumes idle hiding"])
 
-        func idleGesture(_ type: NSEvent.EventType) {
-            let event = NSEvent.mouseEvent(with: type,
-                location: idleCanvas.convert(NSPoint(x: idleCanvas.bounds.midX, y: idleCanvas.bounds.midY), to: nil),
-                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
-                context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
-            if type == .leftMouseDown { idleCanvas.mouseDown(with: event) }
-            else { idleCanvas.mouseUp(with: event) }
-        }
-        idleGesture(.leftMouseDown)
+        let canvasCenter = NSPoint(x: idleCanvas.bounds.midX, y: idleCanvas.bounds.midY)
+        canvasMouse(.leftMouseDown, at: canvasCenter)
         try await Task.sleep(for: .milliseconds(2300))
         precondition(model.controlsVisible && idleCanvas.hasActiveGesture, "Controls disappear during a stationary drag")
-        idleGesture(.leftMouseUp)
+        canvasMouse(.leftMouseUp, at: canvasCenter)
         try await Task.sleep(for: .milliseconds(1200))
         precondition(model.controlsVisible, "Mouse release does not start a fresh idle interval")
         try await Task.sleep(for: .milliseconds(1100))
@@ -169,6 +199,7 @@ func runLayoutChecks(delegate: AppDelegate, output: URL) async {
         try await Task.sleep(for: .milliseconds(2300))
         precondition(model.controlsVisible && model.toolbarCursorRegion != nil, "Editing controls auto-hide")
         records.append(["scenario": "editing controls remain visible"])
+
         let originalFile = try Data(contentsOf: fixture)
         model.commit(.rectangle(CGRect(x: 50, y: 60, width: 100, height: 80), ink: model.ink, width: 4))
         model.commit(.rectangle(CGRect(x: 200, y: 200, width: 80, height: 70), ink: model.ink, width: 3))

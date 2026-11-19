@@ -192,10 +192,17 @@ func runDrawingChecks(delegate: AppDelegate, output: URL) async {
         precondition(!model.isFilling && model.history.operations.count == count)
         checks.append("Closed-frame fill, same-color no-op, busy guards, undo/redo and cancellation")
 
-        let canvas = model.canvas!, inkBeforeText = model.ink, center = canvas.visibleImageCenter!
-        model.activateTool(.text)
+        let canvas = model.canvas!, inkBeforeText = model.ink
+        model.chooseTool(.text)
+        model.setZoom(actualSize: false); canvas.update()
+        precondition(model.textDraft == nil)
+        let insertion = CGPoint(x: 420, y: 320)
+        gesture(.leftMouseDown, at: insertion); gesture(.leftMouseUp, at: insertion)
         let draftInput = canvas.textEditor!.input
-        precondition(window.firstResponder === draftInput && model.textDraft?.origin == center && NSApp.modalWindow == nil)
+        let placed = model.textDraft!.origin
+        precondition(window.firstResponder === draftInput && hypot(placed.x - insertion.x, placed.y - insertion.y) < 0.01 && NSApp.modalWindow == nil)
+        model.chooseTool(.text)
+        precondition(canvas.textEditor?.input === draftInput && window.firstResponder === draftInput)
         draftInput.insertText("取消时保留原画面", replacementRange: NSRange(location: NSNotFound, length: 0))
         model.changeTextStyle(fontSize: 512)
         draftInput.insertText(String(repeating: "大", count: 50), replacementRange: NSRange(location: NSNotFound, length: 0))
@@ -206,7 +213,8 @@ func runDrawingChecks(delegate: AppDelegate, output: URL) async {
         key(53, to: draftInput)
         precondition(model.textDraft == nil && model.history.operations.count == count && model.ink == inkBeforeText)
 
-        model.beginText(at: CGPoint(x: 120, y: 120))
+        gesture(.leftMouseDown, at: CGPoint(x: 120, y: 120))
+        gesture(.leftMouseUp, at: CGPoint(x: 120, y: 120))
         let input = canvas.textEditor!.input
         input.insertText("可撤销输入", replacementRange: NSRange(location: NSNotFound, length: 0))
         input.breakUndoCoalescing()

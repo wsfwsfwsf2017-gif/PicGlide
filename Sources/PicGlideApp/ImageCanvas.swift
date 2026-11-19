@@ -44,12 +44,6 @@ final class CanvasView: NSView {
     override var acceptsFirstResponder: Bool { true }
     var hasActiveGesture: Bool { dragStart != nil || textDrag != nil }
 
-    var visibleImageCenter: CGPoint? {
-        let area = viewport.imageRect.intersection(visibleRect)
-        guard !area.isEmpty else { return nil }
-        return viewport.imagePoint(from: CGPoint(x: area.midX, y: area.midY))
-    }
-
     init(model: ViewerModel) {
         self.model = model
         super.init(frame: .zero)
@@ -97,6 +91,9 @@ final class CanvasView: NSView {
             setAccessibilityLabel(model.currentURL?.lastPathComponent ?? "图片画布")
             notifyZoom()
         }
+        setAccessibilityHelp(model.isEditing && model.tool == .text
+            ? "点击图片添加文字，双击已有文字可编辑。"
+            : "拖动移动图片，滚轮缩放，方向键浏览图片。")
         window?.invalidateCursorRects(for: self)
         updateCropControls()
         updateTextEditor()
@@ -140,7 +137,9 @@ final class CanvasView: NSView {
         if let pointer, textEditor?.frame.contains(pointer) == true { return .iBeam }
         if !spaceHeld, let pointer, textHit(pointer) != nil { return .openHand }
         if !model.isEditing || model.tool == .hand || spaceHeld { return .openHand }
-        if model.tool == .text { return .arrow }
+        if model.tool == .text {
+            return model.canSelectText && pointer.map { viewport.imageRect.contains($0) } == true ? .iBeam : .arrow
+        }
         if model.tool == .crop, let adjustment = cropAdjustment ?? pointer.flatMap(cropHit) {
             switch adjustment {
             case .move: return dragStart == nil ? .openHand : .closedHand
@@ -477,7 +476,11 @@ final class CanvasView: NSView {
                 return
             }
             model.selectedTextID = nil
-            if model.tool == .text { needsDisplay = true; return }
+            if model.tool == .text {
+                if viewport.imageRect.contains(point) { model.beginText(at: viewport.imagePoint(from: point)) }
+                needsDisplay = true
+                return
+            }
         }
         isPanning = !model.isEditing || model.tool == .hand || spaceHeld
         if !isPanning, model.tool == .fill {

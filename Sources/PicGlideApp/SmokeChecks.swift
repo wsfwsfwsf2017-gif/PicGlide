@@ -495,15 +495,25 @@ func runSmokeChecks(delegate: AppDelegate) async {
         let operationCount = model.history.operations.count
         model.setZoom(actualSize: false)
         try await Task.sleep(for: .milliseconds(150))
-        let textButton = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == "文字" }!
+        let textButton = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == "点击图片添加文字" }!
         try await hover(textButton)
         let textButtonPoint = textButton.convert(NSPoint(x: textButton.bounds.midX, y: textButton.bounds.midY), to: nil)
         mouse(.leftMouseDown, at: textButtonPoint); mouse(.leftMouseUp, at: textButtonPoint)
+        try await wait { model.tool == .text }
+        guard model.textDraft == nil else { fatalError("Selecting text opens an input before placing it") }
+        let imageRect = canvas.viewport.imageRect
+        let insertion = CGPoint(x: imageRect.minX + imageRect.width * 0.32, y: imageRect.minY + imageRect.height * 0.42)
+        try await hover(canvas, point: insertion)
+        guard NSCursor.current === NSCursor.iBeam else { fatalError("Text placement does not show the insertion cursor") }
+        let target = canvas.convert(insertion, to: nil)
+        mouse(.leftMouseDown, at: target); mouse(.leftMouseUp, at: target)
         try await wait { canvas.textEditor?.input === delegate.window.firstResponder }
+        let placed = canvas.viewport.viewPoint(from: model.textDraft!.origin)
+        guard hypot(placed.x - insertion.x, placed.y - insertion.y) < 2 else { fatalError("Text input is not at the click location") }
         canvas.textEditor?.input.insertText("画布文字 / PicGlide", replacementRange: NSRange(location: NSNotFound, length: 0))
         try capture("text-inline-editor")
         guard model.finishTextDraft(), let annotation = model.selectedText, let id = model.selectedTextID else {
-            fatalError("Native text button does not create inline annotation")
+            fatalError("Canvas text input does not create inline annotation")
         }
         let old = annotation.patch.bounds
         let textPoint = canvas.convert(canvas.viewport.viewPoint(from: CGPoint(x: old.midX, y: old.midY)), to: nil)
@@ -529,7 +539,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
         model.navigate(-1)
         try await wait { !model.isLoading && model.currentURL == fixture }
         guard model.textOverlay.annotations.isEmpty else { fatalError("Reopening retains in-session annotation data") }
-        checks.append("Native text button focuses input; actual dragging and double click edit text; direct save finishes input; reopening flattens annotations")
+        checks.append("Native text button selects the tool; clicking the image places focused input; dragging, double click, save and reopen work")
     }
     do {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
