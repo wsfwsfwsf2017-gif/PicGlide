@@ -134,7 +134,8 @@ private func drawingImage(width: Int, height: Int, pixels: [UInt8]) throws -> CG
     let mask = try #require(try ImageRenderer.fillMask(in: frame, at: .zero, ink: ink))
     let text = try ImageRenderer.textPatch("字", at: CGPoint(x: 5, y: 5), within: size.bounds,
         fontSize: 32, bold: true, ink: ink)
-    let operations: [EditOperation] = [.fill(mask: mask, ink: ink), .text(patch: text),
+    let annotation = TextAnnotation(content: "字", fontSize: 32, bold: true, ink: ink, patch: text)
+    let operations: [EditOperation] = [.fill(mask: mask, ink: ink), .text(id: UUID(), annotation: annotation),
         .pencil([CGPoint(x: 40, y: 40)], ink: ink, width: 16),
         .rectangle(CGRect(x: 20, y: 20, width: 50, height: 40), ink: ink, width: 8)]
     for operation in operations {
@@ -173,7 +174,9 @@ private func drawingImage(width: Int, height: Int, pixels: [UInt8]) throws -> CG
     #expect(mask.bounds == crop)
     let text = try ImageRenderer.textPatch("画板\nCanvas", at: CGPoint(x: 90, y: 50), within: crop,
         fontSize: 24, bold: true, ink: Ink(red: 0, green: 0, blue: 1))
-    let operations: [EditOperation] = [.crop(crop), .fill(mask: mask, ink: red), .text(patch: text),
+    let id = UUID()
+    let annotation = TextAnnotation(content: "画板\nCanvas", fontSize: 24, bold: true, ink: Ink(red: 0, green: 0, blue: 1), patch: text)
+    let operations: [EditOperation] = [.crop(crop), .fill(mask: mask, ink: red), .text(id: id, annotation: annotation),
         .pencil([CGPoint(x: 100, y: 200)], ink: red, width: 6), .rectangle(crop.insetBy(dx: 2, dy: 2), ink: red, width: 2)]
     var history = EditHistory()
     for operation in operations { history.append(operation) }
@@ -186,7 +189,7 @@ private func drawingImage(width: Int, height: Int, pixels: [UInt8]) throws -> CG
     #expect(full.bounds == crop && preview.bounds == crop)
     let previewBytes = try drawingPixels(preview.image)
     #expect(Array(previewBytes.suffix(4)) == [255, 0, 0, 255])
-    history.markSaved(); history.append(.text(patch: text)); history.restoreSaved()
+    history.markSaved(); history.append(.text(id: id, annotation: nil)); history.restoreSaved()
     #expect(history.operations == operations && !history.canRedo && !history.isDirty)
     for format in [ImageFormat.png, .webp] {
         let data = try ImageCodec.encode(full.image, format: format)
@@ -195,4 +198,53 @@ private func drawingImage(width: Int, height: Int, pixels: [UInt8]) throws -> CG
         #expect(decoded.width == 300 && decoded.height == 220)
         #expect(try drawingPixels(decoded) == drawingPixels(full.image))
     }
+}
+
+@Test func textMovesIndependentlyOfMosaicAndKeepsStackingAfterCrop() throws {
+    let bounds = CGRect(x: 0, y: 0, width: 32, height: 20)
+    let crop = CGRect(x: 2, y: 1, width: 26, height: 15)
+    let green: [UInt8] = [0, 128, 0, 128], red: [UInt8] = [255, 0, 0, 255], blue: [UInt8] = [0, 0, 255, 255]
+    let source = try drawingImage(width: 32, height: 20, pixels: Array(repeating: green, count: 640).flatMap { $0 })
+    let redPatch = try drawingImage(width: 6, height: 4, pixels: Array(repeating: red, count: 24).flatMap { $0 })
+    let bluePatch = try drawingImage(width: 6, height: 4, pixels: Array(repeating: blue, count: 24).flatMap { $0 })
+    let original = CGRect(x: 4, y: 3, width: 6, height: 4)
+    let moved = original.offsetBy(dx: 15, dy: 8)
+    let point = CGPoint(x: 7, y: 5)
+    let id = UUID(), newerID = UUID()
+    let text = TextAnnotation(content: "旧", fontSize: 8, bold: false, ink: Ink(red: 1, green: 0, blue: 0),
+        patch: RenderedImage(image: redPatch, bounds: original))
+    let newer = TextAnnotation(content: "新", fontSize: 8, bold: false, ink: Ink(red: 0, green: 0, blue: 1),
+        patch: RenderedImage(image: bluePatch, bounds: original))
+    func pixels(_ operations: [EditOperation], at point: CGPoint, includeText: Bool = true) throws -> [UInt8] {
+        let frame = try ImageRenderer.render(source: source, originalBounds: bounds, operations: operations, includeText: includeText)
+        let offset = ((Int(point.y) - Int(frame.bounds.minY)) * frame.image.width + Int(point.x) - Int(frame.bounds.minX)) * 4
+        return Array(try drawingPixels(frame.image)[offset..<(offset + 4)])
+    }
+    let add = EditOperation.text(id: id, annotation: text)
+    let stroke = EditOperation.mosaic([point], diameter: 8, blockSize: 4,
+        patch: RenderedImage(image: source, bounds: bounds))
+    #expect(try pixels([add], at: point) == red)
+    #expect(try pixels([add, stroke], at: point) == green)
+    #expect(TextOverlay([add, stroke]).hit(at: point, within: bounds) == nil)
+    var relocated = text
+    relocated.patch = RenderedImage(image: redPatch, bounds: moved)
+    var history = EditHistory()
+    for operation in [add, stroke, .crop(crop), .text(id: id, annotation: relocated)] { history.append(operation) }
+    let newPoint = CGPoint(x: moved.midX, y: moved.midY)
+    #expect(try pixels(history.operations, at: point) == green)
+    #expect(try pixels(history.operations, at: newPoint) == red)
+    #expect(try pixels(history.operations, at: newPoint, includeText: false) == green)
+    #expect(TextOverlay(history.operations).hit(at: newPoint, within: crop) == id)
+    history.undo()
+    #expect(try pixels(history.operations, at: newPoint) == green)
+    history.redo()
+    #expect(try pixels(history.operations, at: newPoint) == red)
+    history.append(.text(id: newerID, annotation: newer))
+    #expect(try pixels(history.operations, at: point) == blue)
+    #expect(TextOverlay(history.operations).hit(at: point, within: crop) == newerID)
+    history.markSaved()
+    history.append(.text(id: id, annotation: nil))
+    #expect(try pixels(history.operations, at: newPoint) == green)
+    history.restoreSaved()
+    #expect(try pixels(history.operations, at: newPoint) == red)
 }

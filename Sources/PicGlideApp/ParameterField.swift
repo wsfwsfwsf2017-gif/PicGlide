@@ -1,6 +1,55 @@
 import AppKit
 import SwiftUI
 
+struct ParameterSlider: NSViewRepresentable {
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let label: String
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeNSView(context: Context) -> NSSlider {
+        let slider = ToolParameterSlider(frame: .zero)
+        slider.minValue = range.lowerBound
+        slider.maxValue = range.upperBound
+        slider.controlSize = .small
+        slider.isContinuous = true
+        slider.setAccessibilityLabel(label)
+        slider.target = context.coordinator
+        slider.action = #selector(Coordinator.changed(_:))
+        return slider
+    }
+
+    func updateNSView(_ slider: NSSlider, context: Context) {
+        context.coordinator.parent = self
+        slider.doubleValue = value
+    }
+
+    @MainActor final class Coordinator: NSObject {
+        var parent: ParameterSlider
+        init(_ parent: ParameterSlider) { self.parent = parent }
+        @objc func changed(_ slider: NSSlider) { parent.value = slider.doubleValue.rounded() }
+    }
+
+    private final class ToolParameterSlider: NSSlider {
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            addTrackingArea(NSTrackingArea(rect: .zero,
+                options: [.mouseEnteredAndExited, .mouseMoved, .activeInKeyWindow, .inVisibleRect], owner: self))
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            window?.acceptsMouseMovedEvents = true
+        }
+        override func mouseEntered(with event: NSEvent) { NSCursor.arrow.set() }
+        override func mouseMoved(with event: NSEvent) { NSCursor.arrow.set() }
+        override func resetCursorRects() {
+            super.resetCursorRects()
+            if !visibleRect.isEmpty { addCursorRect(visibleRect, cursor: .arrow) }
+        }
+    }
+}
+
 struct ParameterField: NSViewRepresentable {
     @Binding var value: Double
     let range: ClosedRange<Double>
@@ -50,12 +99,17 @@ struct ParameterField: NSViewRepresentable {
                 field.stringValue = String(Int(parent.value)); field.selectText(nil)
                 return true
             case #selector(NSResponder.insertNewline(_:)):
-                commit(field); field.window?.makeFirstResponder(parent.model.canvas); return true
+                commit(field); endEditing(field); return true
             case #selector(NSResponder.cancelOperation(_:)):
                 field.stringValue = String(Int(parent.value.rounded()))
-                field.window?.makeFirstResponder(parent.model.canvas); return true
+                endEditing(field); return true
             default: return false
             }
+        }
+
+        private func endEditing(_ field: NSTextField) {
+            let canvas = parent.model.canvas
+            field.window?.makeFirstResponder(field.window === canvas?.window ? canvas : nil)
         }
     }
 }

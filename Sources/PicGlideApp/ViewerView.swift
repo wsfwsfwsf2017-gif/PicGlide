@@ -1,17 +1,23 @@
 import SwiftUI
 
+private typealias ToolOptionsState = SwiftUI.State<Bool>
+
 struct ViewerView: View {
     @Bindable var model: ViewerModel
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @FocusState private var focusedBrowserControl: BrowserControl?
+    @ToolOptionsState private var showsToolOptions = false
 
     private enum BrowserControl: Hashable { case previous, next, zoom }
 
     private var canvasColor: Color {
         colorScheme == .dark ? Color(white: 0.085) : Color(white: 0.91)
     }
+
+    private var showsColor: Bool { [.pencil, .rectangle, .fill, .text].contains(model.parameterTool) }
+    private var hasToolOptions: Bool { [.pencil, .rectangle, .mosaic, .text].contains(model.parameterTool) }
 
     var body: some View {
         GeometryReader { geometry in
@@ -57,6 +63,16 @@ struct ViewerView: View {
         .onChange(of: focusedBrowserControl) { _, control in
             model.toolbarFocused = control != nil
             model.revealControls()
+        }
+        .onChange(of: model.tool) { _, _ in showsToolOptions = false }
+        .onChange(of: model.selectedTextID) { _, _ in showsToolOptions = false }
+        .onChange(of: model.isEditing) { _, _ in showsToolOptions = false }
+        .onChange(of: model.isBusy) { _, busy in if busy { showsToolOptions = false } }
+        .onChange(of: showsToolOptions) { _, isOpen in
+            if !isOpen {
+                model.finishTextStyle()
+                if model.textDraft != nil { model.canvas?.focusTextInput() }
+            }
         }
     }
 
@@ -155,48 +171,47 @@ struct ViewerView: View {
     }
 
     private var controls: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 4) {
-                if model.isEditing {
-                    ForEach(EditTool.allCases, id: \.self) { tool in
-                        Button { model.chooseTool(tool) } label: {
-                            Image(systemName: tool.symbol).font(.system(size: 15, weight: .medium))
-                                .frame(width: 32, height: 32)
-                        }
-                        .buttonStyle(ClickableButtonStyle(selected: model.tool == tool,
-                            help: model.pendingCrop != nil ? "先确认裁剪" : tool.title))
-                        .disabled(!model.canChooseTool)
-                        .accessibilityLabel(tool.title).accessibilityIdentifier("tool.\(tool.rawValue)")
-                        .accessibilityAddTraits(model.tool == tool ? .isSelected : [])
+        HStack(spacing: 4) {
+            if model.isEditing {
+                ForEach([EditTool.hand, .pencil, .rectangle, .text, .mosaic, .crop, .fill], id: \.self) { tool in
+                    Button { model.activateTool(tool) } label: {
+                        Image(systemName: tool.symbol).font(.system(size: 15, weight: .medium))
+                            .frame(width: 32, height: 32)
                     }
-                    separator
-                    iconButton(model.undoTitle, symbol: "arrow.uturn.backward", enabled: model.canUndo,
-                               help: model.pendingCrop != nil ? "先确认裁剪" : model.canUndo ? "\(model.undoTitle)（⌘Z）" : "无法撤销", action: model.undo)
-                    iconButton(model.redoTitle, symbol: "arrow.uturn.forward", enabled: model.canRedo,
-                               help: model.pendingCrop != nil ? "先确认裁剪" : model.canRedo ? "\(model.redoTitle)（⇧⌘Z）" : "无法重做", action: model.redo)
-                    separator
-                } else if !model.isUntitled {
-                    iconButton("上一张", symbol: "chevron.left", enabled: model.index > 0 && model.canNavigate,
-                               help: model.index > 0 ? "上一张（← / ↑）" : "第一张") { model.navigate(-1) }
-                        .focused($focusedBrowserControl, equals: .previous)
-                    Text("\(model.index + 1) / \(model.files.count)")
-                        .font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
-                        .lineLimit(1).frame(width: 78)
-                        .accessibilityLabel("第 \(model.index + 1) 张，共 \(model.files.count) 张")
-                    iconButton("下一张", symbol: "chevron.right", enabled: model.index + 1 < model.files.count && model.canNavigate,
-                               help: model.index + 1 < model.files.count ? "下一张（→ / ↓）" : "最后一张") { model.navigate(1) }
-                        .focused($focusedBrowserControl, equals: .next)
-                    separator
+                    .buttonStyle(ClickableButtonStyle(selected: model.tool == tool,
+                        help: model.pendingCrop != nil ? "先确认裁剪" : tool.title))
+                    .disabled(!model.canChooseTool)
+                    .accessibilityLabel(tool.title).accessibilityIdentifier("tool.\(tool.rawValue)")
+                    .accessibilityAddTraits(model.tool == tool ? .isSelected : [])
                 }
-                zoomMenu
+                if showsColor || hasToolOptions {
+                    separator
+                    if showsColor { colorControl }
+                    if hasToolOptions { parameterControl }
+                }
+                separator
+                iconButton(model.undoTitle, symbol: "arrow.uturn.backward", enabled: model.canUndo,
+                           help: model.pendingCrop != nil ? "先确认裁剪" : model.canUndo ? "\(model.undoTitle)（⌘Z）" : "无法撤销", action: model.undo)
+                iconButton(model.redoTitle, symbol: "arrow.uturn.forward", enabled: model.canRedo,
+                           help: model.pendingCrop != nil ? "先确认裁剪" : model.canRedo ? "\(model.redoTitle)（⇧⌘Z）" : "无法重做", action: model.redo)
+                separator
+            } else if !model.isUntitled {
+                iconButton("上一张", symbol: "chevron.left", enabled: model.index > 0 && model.canNavigate,
+                           help: model.index > 0 ? "上一张（← / ↑）" : "第一张") { model.navigate(-1) }
+                    .focused($focusedBrowserControl, equals: .previous)
+                Text("\(model.index + 1) / \(model.files.count)")
+                    .font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
+                    .lineLimit(1).frame(width: 78)
+                    .accessibilityLabel("第 \(model.index + 1) 张，共 \(model.files.count) 张")
+                iconButton("下一张", symbol: "chevron.right", enabled: model.index + 1 < model.files.count && model.canNavigate,
+                           help: model.index + 1 < model.files.count ? "下一张（→ / ↓）" : "最后一张") { model.navigate(1) }
+                    .focused($focusedBrowserControl, equals: .next)
+                separator
             }
-            .padding(.horizontal, 10).frame(height: 48)
-            if model.hasToolOptions {
-                Divider().opacity(0.4).padding(.horizontal, 12)
-                toolOptions.padding(.horizontal, 14).frame(height: 43)
-            }
+            zoomMenu
         }
-        .frame(width: model.isEditing ? (model.tool == .mosaic ? 560 : 448) : model.isUntitled ? 112 : 280)
+        .padding(.horizontal, 10).frame(height: 48)
+        .frame(width: model.isEditing ? nil : model.isUntitled ? 112 : 280)
         .background(CursorRegion(cursor: .arrow, model: model))
         .background {
             if reduceTransparency {
@@ -209,6 +224,23 @@ struct ViewerView: View {
         .shadow(color: .black.opacity(colorScheme == .dark ? 0.2 : 0.08), radius: 10, y: 4)
         .onHover { hover in model.toolbarHovered = hover; model.revealControls() }
         .disabled(model.isBusy)
+    }
+
+    private var colorControl: some View {
+        SimpleColorPicker(color: NSColor(cgColor: model.parameterInk.cgColor) ?? .black,
+            label: "\(model.parameterTool.title)颜色", onChange: model.setParameterColor, onClose: model.finishTextStyle)
+            .frame(width: 44, height: 24)
+            .background(CursorRegion(cursor: .pointingHand, help: "颜色与透明度"))
+    }
+
+    private var parameterControl: some View {
+        Button { showsToolOptions.toggle() } label: {
+            Image(systemName: "slider.horizontal.3")
+                .font(.system(size: 14, weight: .medium)).frame(width: 32, height: 32)
+        }
+        .buttonStyle(ClickableButtonStyle(selected: showsToolOptions, help: "工具参数"))
+        .accessibilityLabel("工具参数").accessibilityIdentifier("tool.parameters")
+        .popover(isPresented: $showsToolOptions, arrowEdge: .bottom) { toolOptions }
     }
 
     private var zoomMenu: some View {
@@ -229,35 +261,31 @@ struct ViewerView: View {
     }
 
     @ViewBuilder private var toolOptions: some View {
-        HStack(spacing: 8) {
-            Text(model.tool.title).font(.system(size: 12, weight: .medium)).fixedSize()
-            switch model.tool {
+        VStack(alignment: .leading, spacing: 10) {
+            switch model.parameterTool {
             case .mosaic:
-                parameter("大小", value: $model.mosaicDiameter, range: 8...512, unit: "px", id: "mosaicDiameter", sliderWidth: 80)
-                parameter("颗粒", value: $model.blockSize, range: 4...64, unit: "px", id: "blockSize", sliderWidth: 80)
+                parameter("大小", value: $model.mosaicDiameter, range: 8...512, unit: "px", id: "mosaicDiameter", sliderWidth: 100)
+                parameter("颗粒", value: $model.blockSize, range: 4...64, unit: "px", id: "blockSize", sliderWidth: 100)
             case .pencil, .rectangle:
-                Text("颜色").foregroundStyle(.secondary).fixedSize()
-                SimpleColorPicker(color: $model.color, opacity: $model.opacity, label: "画笔颜色")
-                    .frame(width: 44, height: 24).background(CursorRegion(cursor: .pointingHand, help: "颜色"))
-                parameter("粗细", value: $model.lineWidth, range: 1...64, unit: "px", id: "lineWidth", sliderWidth: 54)
-            case .fill:
-                Text("颜色").foregroundStyle(.secondary)
-                SimpleColorPicker(color: $model.color, opacity: $model.opacity, label: "填色颜色")
-                    .frame(width: 44, height: 24).background(CursorRegion(cursor: .pointingHand, help: "颜色"))
+                parameter("粗细", value: $model.lineWidth, range: 1...64, unit: "px", id: "lineWidth", sliderWidth: 100)
+            case .text:
+                parameter("字号", value: Binding(get: { model.parameterTextSize }, set: { model.changeTextStyle(fontSize: $0) }),
+                    range: 8...512, unit: "px", id: "textSize", sliderWidth: 100)
+                Toggle("加粗", isOn: Binding(get: { model.parameterTextBold }, set: { model.changeTextStyle(bold: $0) }))
+                    .accessibilityIdentifier("parameter.textBold")
             default: EmptyView()
             }
         }
-        .font(.system(size: 11)).frame(maxWidth: .infinity, alignment: .center)
+        .font(.system(size: 12)).padding(14)
     }
 
     private func parameter(_ title: String, value: Binding<Double>, range: ClosedRange<Double>,
                            unit: String, id: String, sliderWidth: CGFloat) -> some View {
         HStack(spacing: 5) {
             Text(title).foregroundStyle(.secondary).fixedSize()
-            Slider(value: Binding(get: { value.wrappedValue }, set: { value.wrappedValue = $0.rounded() }), in: range)
-                .frame(width: sliderWidth).background(CursorRegion(cursor: .arrow, help: title))
-                .accessibilityLabel(title)
-            ParameterField(value: value, range: range, label: "\(model.tool.title)\(title)", id: id, model: model)
+            ParameterSlider(value: value, range: range, label: title)
+                .frame(width: sliderWidth, height: 24)
+            ParameterField(value: value, range: range, label: "\(model.parameterTool.title)\(title)", id: id, model: model)
                 .frame(width: 48, height: 24)
                 .background(CursorRegion(cursor: .iBeam, help: title))
             Text(unit).foregroundStyle(.secondary).fixedSize()

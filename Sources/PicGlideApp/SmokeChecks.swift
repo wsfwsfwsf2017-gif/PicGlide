@@ -133,16 +133,16 @@ func runSmokeChecks(delegate: AppDelegate) async {
     func checkToolbarLayout(_ label: String) {
         let toolbar = delegate.model.toolbarCursorRegion!
         let rect = toolbar.convert(toolbar.cursorRect, to: delegate.window.contentView!)
-        guard rect.height <= 96, rect.minX >= 16,
+        guard abs(rect.height - 48) < 1, rect.minX >= 16,
               rect.maxX <= delegate.window.contentView!.bounds.width - 16 else { fatalError("Toolbar does not fit minimum window") }
         measurements[label] = ["width": rect.width, "height": rect.height]
         checks.append(label)
     }
-    func mouse(_ type: CGEventType, at point: NSPoint) {
+    func mouse(_ type: CGEventType, at point: NSPoint, clicks: Int = 1) {
         let screenPoint = delegate.window.convertPoint(toScreen: point)
         let location = CGPoint(x: screenPoint.x, y: NSScreen.screens[0].frame.maxY - screenPoint.y)
         let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: location, mouseButton: .left)!
-        event.setIntegerValueField(.mouseEventClickState, value: 1)
+        event.setIntegerValueField(.mouseEventClickState, value: Int64(clicks))
         event.post(tap: .cghidEventTap)
     }
     func hover(_ view: NSView, point: NSPoint? = nil) async throws {
@@ -220,9 +220,9 @@ func runSmokeChecks(delegate: AppDelegate) async {
         let started = Date()
         try await wait { !model.controlsVisible }
         measurements["idleHideSeconds"] = Date().timeIntervalSince(started)
-        try await Task.sleep(for: .milliseconds(250))
-        guard model.toolbarCursorRegion == nil, canvas.viewport.scale == scale, canvas.viewport.pan == pan else {
-            fatalError("Hidden toolbar leaves cursor regions or changes the image")
+        try await wait { !model.controlsVisible && model.toolbarCursorRegion == nil }
+        guard canvas.viewport.scale == scale, canvas.viewport.pan == pan else {
+            fatalError("Hidden toolbar changes the image viewport")
         }
         try capture("idle-hidden")
         checks.append("Native canvas movement reveals controls; idle hides them without changing the viewport")
@@ -274,7 +274,10 @@ func runSmokeChecks(delegate: AppDelegate) async {
             try await wait { model.isEditing == (help == "展开编辑工具（⌘E）") }
             try await hover(canvas)
             try await Task.sleep(for: .milliseconds(2300))
-            guard model.controlsVisible == model.isEditing else { fatalError("Edit toggle breaks browser idle hiding") }
+            guard model.controlsVisible == model.isEditing else {
+                throw NSError(domain: "PicGlideSmoke", code: 11, userInfo: [NSLocalizedDescriptionKey:
+                    "Idle after edit toggle: editing=\(model.isEditing), visible=\(model.controlsVisible), hovered=\(model.toolbarHovered), focused=\(model.toolbarFocused), menu=\(model.toolbarMenuTracking), gesture=\(canvas.hasActiveGesture), busy=\(model.isBusy)"])
+            }
         }
         checks.append("Native edit button keeps editing controls visible; closing tools resumes browser idle hiding")
         try await hover(canvas)
@@ -379,6 +382,155 @@ func runSmokeChecks(delegate: AppDelegate) async {
         guard try ImageMetadata.read(url).pixelSize == crop.size else { fatalError("Frozen mosaic save loses crop dimensions") }
         checks.append("4K mosaic entire mouse-up transition, zoom, redo, crop, queued clicks, save guard, Esc and export: alpha=\(opacity)")
     }
+    func checkEditorParameters(_ canvas: CanvasView) async throws {
+        let model = delegate.model
+        let controls = nativeControls(in: delegate.window.contentView!)
+        measurements["editorNativeControls"] = controls.map { String(describing: type(of: $0)) }
+        guard !controls.contains(where: { $0 is NSSlider }) else { fatalError("Parameter slider is visible before opening tool settings") }
+        let parameterButton = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == "工具参数" }!
+        try await hover(parameterButton)
+        let parameterPoint = parameterButton.convert(NSPoint(x: parameterButton.bounds.midX, y: parameterButton.bounds.midY), to: nil)
+        mouse(.leftMouseDown, at: parameterPoint); mouse(.leftMouseUp, at: parameterPoint)
+        var widthField: NSTextField?
+        try await wait {
+            widthField = NSApp.windows.filter(\.isVisible).compactMap(\.contentView).flatMap(nativeControls)
+                .compactMap { $0 as? NSTextField }.first { $0.identifier?.rawValue == "parameter.lineWidth" }
+            return widthField != nil
+        }
+        let widthInput = widthField!, parameterWindow = widthInput.window!
+        try await Task.sleep(for: .milliseconds(350))
+        let sliders = nativeControls(in: parameterWindow.contentView!).compactMap { $0 as? NSSlider }
+        guard sliders.count == 1, sliders[0].accessibilityLabel() == "粗细" else {
+            fatalError("Brush width slider missing or opacity is duplicated outside the palette")
+        }
+        let widthSlider = sliders[0]
+        let localPoint = widthSlider.convert(NSPoint(x: widthSlider.bounds.width * 0.75, y: widthSlider.bounds.midY), to: nil)
+        let sliderPoint = delegate.window.convertPoint(fromScreen: parameterWindow.convertPoint(toScreen: localPoint))
+        mouse(.mouseMoved, at: sliderPoint)
+        try await Task.sleep(for: .milliseconds(150))
+        let sliderCursor = NSCursor.current
+        let arrow = NSCursor.arrow
+        let sliderUsesArrow = sliderCursor === arrow || (sliderCursor.hotSpot == arrow.hotSpot &&
+            sliderCursor.image.tiffRepresentation == arrow.image.tiffRepresentation)
+        measurements["parameterSlider"] = ["usesArrow": sliderUsesArrow, "cursorHotSpot": NSStringFromPoint(sliderCursor.hotSpot),
+            "cursorSize": NSStringFromSize(sliderCursor.image.size), "mouseIsInPopup": parameterWindow.frame.contains(NSEvent.mouseLocation)]
+        let originalWidth = model.lineWidth
+        mouse(.leftMouseDown, at: sliderPoint); mouse(.leftMouseUp, at: sliderPoint)
+        try await wait { model.lineWidth != originalWidth }
+        model.lineWidth = originalWidth
+        checks.append("Native slider click changes brush width")
+        try await Task.sleep(for: .milliseconds(150))
+        let indexBeforeInput = model.index
+        widthInput.selectText(nil)
+        let up = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: parameterWindow.windowNumber,
+            context: nil, characters: "\u{F700}", charactersIgnoringModifiers: "\u{F700}", isARepeat: false, keyCode: 126)!
+        parameterWindow.sendEvent(up)
+        guard model.lineWidth == originalWidth + 1, model.index == indexBeforeInput else {
+            throw NSError(domain: "PicGlideSmoke", code: 9, userInfo: [NSLocalizedDescriptionKey:
+                "Numeric arrow: before=\(originalWidth), after=\(model.lineWidth), field=\(widthInput.stringValue), index=\(model.index)/\(indexBeforeInput), responder=\(String(describing: parameterWindow.firstResponder)), editor=\(String(describing: widthInput.currentEditor()))"])
+        }
+        widthInput.stringValue = "18"
+        (widthInput.currentEditor() as? NSTextView)?.string = "18"
+        parameterWindow.makeFirstResponder(nil)
+        guard model.lineWidth == 18 else { fatalError("Numeric field did not commit direct input") }
+        model.lineWidth = originalWidth
+        let outsideOptions = CGPoint(x: delegate.window.frame.width / 2, y: delegate.window.frame.height - 16)
+        mouse(.leftMouseDown, at: outsideOptions); mouse(.leftMouseUp, at: outsideOptions)
+        try await wait { !parameterWindow.isVisible }
+        guard !model.isDirty else { fatalError("Tool parameters changed the drawing") }
+        checks.append("Native number input commits values and arrow keys step without navigating; closing tool options leaves drawing unchanged")
+        guard sliderUsesArrow else { fatalError("Parameter popover preserves a canvas cursor over its slider") }
+        checks.append("Slider hover shows arrow in tool parameters")
+        let colorButton = controls.first { $0 is PaletteColorButton } as! PaletteColorButton
+        colorButton.performClick(nil)
+        try await wait { colorButton.popover?.isShown == true }
+        guard let palette = colorButton.palette, palette.numberFields.count == 4 else { fatalError("Gradient palette or RGBA fields missing") }
+        palette.view.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(150))
+        let originalColor = colorButton.color, originalOpacity = model.opacity
+        let rect = palette.colorBoard.selectionRect
+        let paletteWindow = palette.view.window!
+        let screenPoint = paletteWindow.convertPoint(toScreen: palette.colorBoard.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil))
+        let boardPoint = delegate.window.convertPoint(fromScreen: screenPoint)
+        mouse(.mouseMoved, at: boardPoint)
+        mouse(.leftMouseDown, at: boardPoint); mouse(.leftMouseUp, at: boardPoint)
+        do {
+            try await wait { abs(palette.colorBoard.brightness - 0.5) < 0.005 && abs(palette.colorBoard.saturation - 0.5) < 0.005 }
+        } catch {
+            let diagnostic: [String: Any] = ["frame": NSStringFromRect(paletteWindow.frame),
+                "board": NSStringFromRect(palette.colorBoard.frame), "target": NSStringFromPoint(screenPoint),
+                "mouse": NSStringFromPoint(paletteWindow.mouseLocationOutsideOfEventStream),
+                "mouseSelections": palette.colorBoard.mouseSelections, "key": paletteWindow.isKeyWindow,
+                "ignoresMouse": paletteWindow.ignoresMouseEvents,
+                "fields": palette.numberFields.map(\.stringValue), "dirty": model.isDirty]
+            try JSONSerialization.data(withJSONObject: diagnostic, options: [.prettyPrinted])
+                .write(to: output.appendingPathComponent("palette-failure.json"))
+            throw error
+        }
+        guard palette.colorBoard.mouseSelections > 0 && !model.isDirty else { fatalError("Palette click reaches canvas instead of the palette") }
+        let picked = model.ink
+        let components = [picked.red * 255, picked.green * 255, picked.blue * 255, picked.alpha * 100]
+            .map { String(Int($0.rounded())) }
+        guard abs(palette.colorBoard.saturation - 0.5) < 0.005,
+              abs(palette.colorBoard.brightness - 0.5) < 0.005,
+              palette.numberFields.map(\.stringValue) == components else { fatalError("Gradient click did not update RGB fields") }
+        for (field, value) in zip(palette.numberFields, ["255", "0", "0", "40"]) {
+            field.stringValue = value
+            field.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: field))
+        }
+        guard model.ink.red > 0.95 && model.ink.green < 0.01 && model.ink.blue < 0.01 else { fatalError("Palette selection did not update brush color") }
+        guard model.opacity == 0.4 && model.ink.alpha == 0.4 else { fatalError("Palette opacity did not reach the brush") }
+        guard palette.colorBoard.saturation == 1 && palette.colorBoard.brightness == 1 else { fatalError("RGB input did not update gradient selection") }
+        colorButton.closePalette()
+        model.color = Color(nsColor: originalColor.withAlphaComponent(1)); model.opacity = originalOpacity
+        try await hover(canvas)
+        guard NSCursor.current === NSCursor.crosshair else { fatalError("Palette close did not restore canvas cursor") }
+        checks.append("Gradient and RGBA input update each other; opacity reaches brush; close restores drawing cursor")
+    }
+    func checkInlineText(_ canvas: CanvasView, fixture: URL) async throws {
+        let model = delegate.model
+        if !model.isEditing { model.toggleEditing() }
+        try await wait { model.isEditing && !model.isPreparingEdit }
+        let operationCount = model.history.operations.count
+        model.setZoom(actualSize: false)
+        try await Task.sleep(for: .milliseconds(150))
+        let textButton = cursorRegions(in: delegate.window.contentView!).first { $0.helpText == "文字" }!
+        try await hover(textButton)
+        let textButtonPoint = textButton.convert(NSPoint(x: textButton.bounds.midX, y: textButton.bounds.midY), to: nil)
+        mouse(.leftMouseDown, at: textButtonPoint); mouse(.leftMouseUp, at: textButtonPoint)
+        try await wait { canvas.textEditor?.input === delegate.window.firstResponder }
+        canvas.textEditor?.input.insertText("画布文字 / PicGlide", replacementRange: NSRange(location: NSNotFound, length: 0))
+        try capture("text-inline-editor")
+        guard model.finishTextDraft(), let annotation = model.selectedText, let id = model.selectedTextID else {
+            fatalError("Native text button does not create inline annotation")
+        }
+        let old = annotation.patch.bounds
+        let textPoint = canvas.convert(canvas.viewport.viewPoint(from: CGPoint(x: old.midX, y: old.midY)), to: nil)
+        let movePoint = CGPoint(x: textPoint.x - 40, y: textPoint.y + 44)
+        let panBeforeTextDrag = canvas.viewport.pan
+        mouse(.mouseMoved, at: textPoint)
+        mouse(.leftMouseDown, at: textPoint)
+        try await wait { canvas.hasActiveGesture && model.selectedTextID == id }
+        mouse(.leftMouseDragged, at: movePoint); mouse(.leftMouseUp, at: movePoint)
+        try await wait { !canvas.hasActiveGesture && model.history.operations.count == operationCount + 2 }
+        guard let moved = model.selectedText?.patch.bounds, moved.minX < old.minX, moved.minY < old.minY,
+              canvas.viewport.pan == panBeforeTextDrag else { fatalError("Dragging text pans image or does not move text") }
+        mouse(.leftMouseDown, at: movePoint, clicks: 2); mouse(.leftMouseUp, at: movePoint, clicks: 2)
+        try await wait { model.textDraft?.id == id }
+        guard canvas.textEditor?.input.string == annotation.content else { fatalError("Double click does not restore text for editing") }
+        canvas.textEditor?.input.insertText("！", replacementRange: NSRange(location: NSNotFound, length: 0))
+        model.save()
+        try await wait { !model.isSaving && !model.isDirty }
+        guard model.textOverlay.annotations[id]?.content == annotation.content + "！" else { fatalError("Save lost in-progress text") }
+        try capture("text-dragged-and-saved")
+        model.navigate(1)
+        try await wait { !model.isLoading && model.currentURL != fixture }
+        model.navigate(-1)
+        try await wait { !model.isLoading && model.currentURL == fixture }
+        guard model.textOverlay.annotations.isEmpty else { fatalError("Reopening retains in-session annotation data") }
+        checks.append("Native text button focuses input; actual dragging and double click edit text; direct save finishes input; reopening flattens annotations")
+    }
     do {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         try? FileManager.default.removeItem(at: output.appendingPathComponent("ui-report.json"))
@@ -451,6 +603,21 @@ func runSmokeChecks(delegate: AppDelegate) async {
         }
         let mousePosition = CGEvent(source: nil)!.location
         defer { CGWarpMouseCursorPosition(mousePosition) }
+        if ProcessInfo.processInfo.environment["PICGLIDE_EDITOR_ONLY"] == "1" {
+            model.toggleEditing()
+            try await wait { model.isEditing && !model.isPreparingEdit }
+            model.chooseTool(.pencil)
+            try await Task.sleep(for: .milliseconds(150))
+            try await checkEditorParameters(canvas)
+            try await checkInlineText(canvas, fixture: fixture)
+            try JSONSerialization.data(withJSONObject: ["checks": checks, "measurements": measurements],
+                                       options: [.prettyPrinted, .sortedKeys])
+                .write(to: output.appendingPathComponent("ui-report.json"))
+            print("PICGLIDE_UI_EDITOR_PASS \(checks.count) checks")
+            fflush(stdout)
+            NSApp.terminate(nil)
+            return
+        }
         try await checkIdleControls(canvas)
         if ProcessInfo.processInfo.environment["PICGLIDE_IDLE_ONLY"] == "1" {
             try JSONSerialization.data(withJSONObject: ["checks": checks, "measurements": measurements],
@@ -637,91 +804,7 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try await hover(canvas)
         guard NSCursor.current === NSCursor.crosshair else { fatalError("Space release did not restore crosshair") }
         checks.append("Space temporarily changes editor cursor to hand")
-        let controls = nativeControls(in: delegate.window.contentView!)
-        measurements["editorNativeControls"] = controls.map { String(describing: type(of: $0)) }
-        for control in controls where control is NSSlider {
-            try await hover(control)
-            guard NSCursor.current === NSCursor.arrow else { fatalError("Native editor control cursor is not arrow") }
-        }
-        let sliders = cursorRegions(in: delegate.window.contentView!).filter {
-            $0.cursor === NSCursor.arrow && ["粗细", "透明度"].contains($0.helpText)
-        }
-        guard sliders.count == 1 else { fatalError("Brush width slider missing or opacity is duplicated outside the palette") }
-        for slider in sliders {
-            try await hover(slider)
-            guard NSCursor.current === NSCursor.arrow else { fatalError("Slider hover did not use arrow") }
-        }
-        let widthSlider = sliders.first { $0.helpText == "粗细" }!
-        let sliderPoint = widthSlider.convert(NSPoint(x: widthSlider.bounds.width * 0.75, y: widthSlider.bounds.midY), to: nil)
-        let originalWidth = model.lineWidth
-        mouse(.leftMouseDown, at: sliderPoint); mouse(.leftMouseUp, at: sliderPoint)
-        try await wait { model.lineWidth != originalWidth }
-        model.lineWidth = originalWidth
-        checks.append("Native slider hover uses arrow and click changes brush width")
-        try await Task.sleep(for: .milliseconds(150))
-        let widthField = nativeControls(in: delegate.window.contentView!).compactMap { $0 as? NSTextField }
-            .first { $0.identifier?.rawValue == "parameter.lineWidth" }!
-        let indexBeforeInput = model.index
-        widthField.selectText(nil)
-        let up = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
-            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: delegate.window.windowNumber,
-            context: nil, characters: "\u{F700}", charactersIgnoringModifiers: "\u{F700}", isARepeat: false, keyCode: 126)!
-        delegate.window.sendEvent(up)
-        guard model.lineWidth == originalWidth + 1, model.index == indexBeforeInput else {
-            throw NSError(domain: "PicGlideSmoke", code: 9, userInfo: [NSLocalizedDescriptionKey:
-                "Numeric arrow: before=\(originalWidth), after=\(model.lineWidth), field=\(widthField.stringValue), index=\(model.index)/\(indexBeforeInput), responder=\(String(describing: delegate.window.firstResponder)), editor=\(String(describing: widthField.currentEditor()))"])
-        }
-        widthField.stringValue = "18"
-        (widthField.currentEditor() as? NSTextView)?.string = "18"
-        delegate.window.makeFirstResponder(canvas)
-        guard model.lineWidth == 18 else { fatalError("Numeric field did not commit direct input") }
-        model.lineWidth = originalWidth
-        checks.append("Native number input commits values and arrow keys step without navigating")
-        let colorButton = controls.first { $0 is PaletteColorButton } as! PaletteColorButton
-        colorButton.performClick(nil)
-        try await wait { colorButton.popover?.isShown == true }
-        guard let palette = colorButton.palette, palette.numberFields.count == 4 else { fatalError("Gradient palette or RGBA fields missing") }
-        palette.view.layoutSubtreeIfNeeded()
-        try await Task.sleep(for: .milliseconds(150))
-        let originalColor = colorButton.color, originalOpacity = model.opacity
-        let rect = palette.colorBoard.selectionRect
-        let paletteWindow = palette.view.window!
-        let screenPoint = paletteWindow.convertPoint(toScreen: palette.colorBoard.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil))
-        let boardPoint = delegate.window.convertPoint(fromScreen: screenPoint)
-        mouse(.mouseMoved, at: boardPoint)
-        mouse(.leftMouseDown, at: boardPoint); mouse(.leftMouseUp, at: boardPoint)
-        do {
-            try await wait { abs(palette.colorBoard.brightness - 0.5) < 0.005 && abs(palette.colorBoard.saturation - 0.5) < 0.005 }
-        } catch {
-            let diagnostic: [String: Any] = ["frame": NSStringFromRect(paletteWindow.frame),
-                "board": NSStringFromRect(palette.colorBoard.frame), "target": NSStringFromPoint(screenPoint),
-                "mouse": NSStringFromPoint(paletteWindow.mouseLocationOutsideOfEventStream),
-                "mouseSelections": palette.colorBoard.mouseSelections, "key": paletteWindow.isKeyWindow,
-                "ignoresMouse": paletteWindow.ignoresMouseEvents,
-                "fields": palette.numberFields.map(\.stringValue), "dirty": model.isDirty]
-            try JSONSerialization.data(withJSONObject: diagnostic, options: [.prettyPrinted])
-                .write(to: output.appendingPathComponent("palette-failure.json"))
-            throw error
-        }
-        guard palette.colorBoard.mouseSelections > 0 && !model.isDirty else { fatalError("Palette click reaches canvas instead of the palette") }
-        let picked = model.ink
-        let components = [picked.red * 255, picked.green * 255, picked.blue * 255, picked.alpha * 100]
-            .map { String(Int($0.rounded())) }
-        guard abs(palette.colorBoard.saturation - 0.5) < 0.005,
-              abs(palette.colorBoard.brightness - 0.5) < 0.005,
-              palette.numberFields.map(\.stringValue) == components else { fatalError("Gradient click did not update RGB fields") }
-        for (field, value) in zip(palette.numberFields, ["255", "0", "0", "40"]) {
-            field.stringValue = value
-            field.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: field))
-        }
-        guard model.ink.red > 0.95 && model.ink.green < 0.01 && model.ink.blue < 0.01 else { fatalError("Palette selection did not update brush color") }
-        guard model.opacity == 0.4 && model.ink.alpha == 0.4 else { fatalError("Palette opacity did not reach the brush") }
-        guard palette.colorBoard.saturation == 1 && palette.colorBoard.brightness == 1 else { fatalError("RGB input did not update gradient selection") }
-        colorButton.closePalette()
-        model.color = Color(nsColor: originalColor.withAlphaComponent(1)); model.opacity = originalOpacity
-        try await hover(canvas)
-        guard NSCursor.current === NSCursor.crosshair else { fatalError("Palette close did not restore canvas cursor") }
-        checks.append("Gradient and RGBA input update each other; opacity reaches brush; close restores drawing cursor")
+        try await checkEditorParameters(canvas)
         let a = canvas.viewport.viewPoint(from: CGPoint(x: 200, y: 220))
         let b = canvas.viewport.viewPoint(from: CGPoint(x: 600, y: 380))
         drag(a, b, canvas: canvas)
@@ -1071,6 +1154,8 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try await Task.sleep(for: .milliseconds(200))
         measurements["afterMosaic24mpResidentMiB"] = residentMiB()
         checks.append("24MP image uses a capped brush preview during continuous input and releases the canceled gesture")
+
+        try await checkInlineText(canvas, fixture: fixture)
 
         if ProcessInfo.processInfo.environment["PICGLIDE_PROFILE"] == "1" {
             let folder = output.appendingPathComponent("performance")

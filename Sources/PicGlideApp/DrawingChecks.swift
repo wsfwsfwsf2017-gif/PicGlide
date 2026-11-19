@@ -63,6 +63,20 @@ func runDrawingChecks(delegate: AppDelegate, output: URL) async {
         field.stringValue = value
         field.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: field))
     }
+    func key(_ code: UInt16, to view: NSView, characters: String = "", modifiers: NSEvent.ModifierFlags = []) {
+        view.keyDown(with: NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers,
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+            characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code)!)
+    }
+    func gesture(_ type: NSEvent.EventType, at point: CGPoint, clicks: Int = 1) {
+        let canvas = model.canvas!
+        let event = NSEvent.mouseEvent(with: type, location: canvas.convert(canvas.viewport.viewPoint(from: point), to: nil),
+            modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+            context: nil, eventNumber: 1, clickCount: clicks, pressure: 1)!
+        switch type { case .leftMouseDown: canvas.mouseDown(with: event)
+        case .leftMouseDragged: canvas.mouseDragged(with: event)
+        default: canvas.mouseUp(with: event) }
+    }
     func chooseColor(_ button: PaletteColorButton, rgb: [Int], opacity: Double) {
         button.performClick(nil)
         precondition(button.popover?.isShown == true && button.palette?.numberFields.count == 4)
@@ -178,63 +192,82 @@ func runDrawingChecks(delegate: AppDelegate, output: URL) async {
         precondition(!model.isFilling && model.history.operations.count == count)
         checks.append("Closed-frame fill, same-color no-op, busy guards, undo/redo and cancellation")
 
-        model.chooseTool(.text)
-        let inkBeforeText = model.ink
-        modal { panel in
-            let color = control("drawing.text.color", in: panel, as: PaletteColorButton.self)
-            precondition(color.color.alphaComponent == model.opacity)
-            chooseColor(color, rgb: [0, 153, 255], opacity: 0.2)
-            let add = button("添加文字", in: panel)
-            precondition(!add.isEnabled && !model.canSave && !model.canToggleEditing)
-            let text = control("drawing.text.content", in: panel, as: NSTextView.self)
-            text.string = "取消时保留原画面"
-            text.delegate?.textDidChange?(Notification(name: NSText.didChangeNotification, object: text))
-            let size = control("drawing.text.size", in: panel, as: NSTextField.self)
-            editField(size, value: "0"); precondition(!add.isEnabled)
-            editField(size, value: "32"); precondition(add.isEnabled)
-            try! capture("text-input-light", in: panel)
-            button("取消", in: panel).performClick(nil)
-        }
-        model.addText(at: CGPoint(x: 120, y: 120))
-        precondition(model.history.operations.count == count && model.ink == inkBeforeText)
-        modal { panel in
-            precondition(NSApp.keyWindow === panel)
-            let text = control("drawing.text.content", in: panel, as: NSTextView.self)
-            panel.makeFirstResponder(text)
-            text.insertText("可撤销输入", replacementRange: NSRange(location: NSNotFound, length: 0))
-            text.breakUndoCoalescing()
-            precondition(text.undoManager?.canUndo == true)
-            delegate.undoEdit()
-            precondition(text.string.isEmpty && model.history.operations.count == count)
-            text.string = "绘画板\nHello PicGlide"
-            text.delegate?.textDidChange?(Notification(name: NSText.didChangeNotification, object: text))
-            editField(control("drawing.text.size", in: panel, as: NSTextField.self), value: "48")
-            let bold = control("drawing.text.bold", in: panel, as: NSButton.self)
-            bold.performClick(nil)
-            let color = control("drawing.text.color", in: panel, as: PaletteColorButton.self)
-            chooseColor(color, rgb: [255, 0, 0], opacity: 0.5)
-            precondition(!delegate.windowShouldClose(window) && delegate.applicationShouldTerminate(NSApp) == .terminateCancel)
-            button("添加文字", in: panel).performClick(nil)
-        }
-        model.addText(at: CGPoint(x: 120, y: 120))
+        let canvas = model.canvas!, inkBeforeText = model.ink, center = canvas.visibleImageCenter!
+        model.activateTool(.text)
+        let draftInput = canvas.textEditor!.input
+        precondition(window.firstResponder === draftInput && model.textDraft?.origin == center && NSApp.modalWindow == nil)
+        draftInput.insertText("取消时保留原画面", replacementRange: NSRange(location: NSNotFound, length: 0))
+        model.changeTextStyle(fontSize: 512)
+        draftInput.insertText(String(repeating: "大", count: 50), replacementRange: NSRange(location: NSNotFound, length: 0))
+        key(36, to: draftInput, characters: "\r", modifiers: .command)
+        precondition(model.textError != nil && model.textDraft?.content == draftInput.string &&
+            window.firstResponder === draftInput && model.history.operations.count == count)
+        try capture("text-input-oversize")
+        key(53, to: draftInput)
+        precondition(model.textDraft == nil && model.history.operations.count == count && model.ink == inkBeforeText)
+
+        model.beginText(at: CGPoint(x: 120, y: 120))
+        let input = canvas.textEditor!.input
+        input.insertText("可撤销输入", replacementRange: NSRange(location: NSNotFound, length: 0))
+        input.breakUndoCoalescing()
+        precondition(input.undoManager?.canUndo == true)
+        delegate.undoEdit()
+        precondition(input.string.isEmpty && model.history.operations.count == count)
+        input.insertText("绘画板", replacementRange: NSRange(location: NSNotFound, length: 0))
+        key(36, to: input, characters: "\r")
+        input.insertText("Hello PicGlide", replacementRange: NSRange(location: NSNotFound, length: 0))
+        precondition(model.textDraft?.content == "绘画板\nHello PicGlide")
+        model.changeTextStyle(fontSize: 48, bold: true)
+        try await Task.sleep(for: .milliseconds(150))
+        let color = control("parameter.color", in: window, as: PaletteColorButton.self)
+        precondition(color.color.alphaComponent == model.opacity)
+        chooseColor(color, rgb: [255, 0, 0], opacity: 0.5)
+        try capture("text-input-light")
+        respond("取消"); precondition(!delegate.windowShouldClose(window))
+        precondition(model.textDraft?.content == "绘画板\nHello PicGlide")
+        key(36, to: input, characters: "\r", modifiers: .command)
         try await wait { model.frameRevision == model.editRevision }
         precondition(model.history.operations.count == count + 1 && model.isEditing && model.opacity == 0.5)
-        checks.append("Text dialog validates input, cancels cleanly, supports input undo, Chinese, multiline, bold and color; blocks document close")
+        let annotationID = model.selectedTextID!, originalText = model.selectedText!
+        precondition(originalText.bold && originalText.fontSize == 48 && originalText.ink == Ink(red: 1, green: 0, blue: 0, alpha: 0.5))
+        checks.append("Inline text focuses immediately and supports Chinese, multiline, input undo, oversize validation, color, style, Esc and close protection")
+
+        model.chooseTool(.hand)
+        let start = CGPoint(x: originalText.patch.bounds.midX, y: originalText.patch.bounds.midY)
+        let end = CGPoint(x: start.x + 120, y: start.y + 160)
+        gesture(.leftMouseDown, at: start)
+        gesture(.leftMouseDragged, at: end)
+        precondition(model.history.operations.count == count + 1 && model.selectedTextID == annotationID)
+        gesture(.leftMouseUp, at: end)
+        let movedText = model.selectedText!
+        precondition(movedText.patch.bounds == originalText.patch.bounds.offsetBy(dx: 120, dy: 160) &&
+            model.history.operations.count == count + 2)
+        key(124, to: canvas)
+        precondition(model.selectedText?.patch.bounds == movedText.patch.bounds.offsetBy(dx: 1, dy: 0))
+        model.undo(); precondition(model.selectedText == movedText)
+        model.undo(); precondition(model.selectedText == originalText)
+        model.redo(); precondition(model.selectedText == movedText)
+        gesture(.leftMouseDown, at: end, clicks: 2)
+        precondition(model.textDraft?.id == annotationID && canvas.textEditor?.input.string == originalText.content)
+        canvas.textEditor?.input.insertText("！", replacementRange: NSRange(location: NSNotFound, length: 0))
+        gesture(.leftMouseDown, at: CGPoint(x: 700, y: 500))
+        precondition(model.selectedText?.content == originalText.content + "！" && model.textDraft == nil)
+        key(51, to: canvas)
+        precondition(model.textOverlay.annotations[annotationID] == nil)
+        model.undo()
+        precondition(model.textOverlay.annotations[annotationID]?.content == originalText.content + "！")
+        checks.append("Hand selects and drags in one undoable operation; arrow moves one pixel; double click edits; blank click commits; Delete and undo restore text")
 
         model.chooseTool(.crop); model.pendingCrop = CGRect(x: 50, y: 60, width: 800, height: 600)
         model.applyCrop(); try await wait { model.frameRevision == model.editRevision }
         let crop = model.frame!.bounds
         model.chooseTool(.fill); model.color = .green; model.fill(at: CGPoint(x: 700, y: 500))
         try await wait { !model.isFilling && model.frameRevision == model.editRevision }
-        model.chooseTool(.text)
-        modal { panel in
-            let text = control("drawing.text.content", in: panel, as: NSTextView.self)
-            text.string = "角落"; text.delegate?.textDidChange?(Notification(name: NSText.didChangeNotification, object: text))
-            button("添加文字", in: panel).performClick(nil)
-        }
-        model.addText(at: CGPoint(x: crop.maxX - 1, y: crop.maxY - 1))
+        model.beginText(at: CGPoint(x: crop.maxX - 1, y: crop.maxY - 1))
+        canvas.textEditor?.input.insertText("角落", replacementRange: NSRange(location: NSNotFound, length: 0))
+        precondition(model.finishTextDraft())
         try await wait { model.frameRevision == model.editRevision }
-        if case let .text(patch) = model.history.operations.last! { precondition(crop.contains(patch.bounds)) }
+        if case let .text(_, annotation?) = model.history.operations.last! { precondition(crop.contains(annotation.patch.bounds)) }
         else { preconditionFailure("Expected text operation") }
         checks.append("Crop then fill and edge text keep original coordinates and visible text bounds")
 
@@ -247,7 +280,7 @@ func runDrawingChecks(delegate: AppDelegate, output: URL) async {
                     try await Task.sleep(for: .milliseconds(100))
                     let canvas = model.canvas!, region = model.toolbarCursorRegion!
                     let rect = canvas.convert(region.cursorRect, from: region)
-                    precondition(region.cursorRect.height <= 93 && canvas.viewport.imageRect.intersection(rect).isEmpty,
+                    precondition(abs(region.cursorRect.height - 48) < 1 && canvas.viewport.imageRect.intersection(rect).isEmpty,
                         "Tool layout: \(tool.rawValue), toolbar=\(rect), image=\(canvas.viewport.imageRect), canvas=\(canvas.bounds)")
                     precondition(region.convert(region.cursorRect, to: window.contentView!).minX >= 19)
                     if tool == .text || tool == .fill { try capture("drawing-\(theme)-\(screen.localizedName)-\(tool.rawValue)") }
@@ -274,7 +307,10 @@ func runDrawingChecks(delegate: AppDelegate, output: URL) async {
         let pngMetadata = try ImageMetadata.read(png)
         precondition(pngMetadata.pixelSize == crop.size)
         let saved = try Data(contentsOf: png), savedOperations = model.history.operations
-        model.commit(.pencil([CGPoint(x: 60, y: 80)], ink: ink, width: 6))
+        let savedText = model.textOverlay.annotations[annotationID]!
+        model.moveText(annotationID, to: model.textPatch(savedText.patch,
+            movedTo: CGPoint(x: savedText.patch.bounds.minX + 20, y: savedText.patch.bounds.minY + 20)))
+        precondition(model.textOverlay.annotations[annotationID]?.patch.bounds != savedText.patch.bounds)
         respond("取消"); model.restoreEdits(); precondition(model.isDirty)
         respond("舍弃修改"); model.restoreEdits()
         try await wait { model.frameRevision == model.editRevision }

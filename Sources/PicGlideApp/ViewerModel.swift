@@ -25,7 +25,14 @@ final class ViewerModel {
     var currentURL: URL?
     var imageID = UUID()
     var files: [URL] = []
-    var history = EditHistory()
+    var history = EditHistory() {
+        didSet { textOverlay = TextOverlay(history.operations) }
+    }
+    private(set) var textOverlay = TextOverlay([])
+    var selectedTextID: UUID?
+    private(set) var textDraft: CanvasTextDraft?
+    private(set) var textStylePreview: (id: UUID, annotation: TextAnnotation)?
+    private(set) var textError: String?
     private(set) var editRevision = 0
     private(set) var frameRevision = 0
     var isLoading = false
@@ -79,19 +86,31 @@ final class ViewerModel {
     var index: Int { currentURL.flatMap { files.firstIndex(of: $0) } ?? 0 }
     var isUntitled: Bool { frame != nil && currentURL == nil }
     var documentName: String { currentURL?.lastPathComponent ?? "未命名" }
-    var isDirty: Bool { isUntitled || history.isDirty }
+    var isDirty: Bool { isUntitled || history.isDirty || hasTextChanges }
     var isBusy: Bool { isSaving || isPreparingEdit || isCreatingCanvas || isFilling || isShowingPanel }
     var needsLeaveConfirmation: Bool { isDirty || pendingCrop != nil }
     var canToggleEditing: Bool { frame != nil && !isBusy && !isDrawing && pendingMosaicCount == 0 && pendingCrop == nil }
     var canChooseTool: Bool { !isBusy && pendingCrop == nil }
     var canNavigate: Bool { currentURL != nil && !files.isEmpty && !isBusy && !isDrawing && pendingMosaicCount == 0 && pendingCrop == nil }
-    var canUndo: Bool { history.canUndo && !isBusy && pendingMosaicCount == 0 && pendingCrop == nil }
-    var canRedo: Bool { history.canRedo && !isBusy && pendingMosaicCount == 0 && pendingCrop == nil }
+    var canUndo: Bool { history.canUndo && textDraft == nil && !isBusy && pendingMosaicCount == 0 && pendingCrop == nil }
+    var canRedo: Bool { history.canRedo && textDraft == nil && !isBusy && pendingMosaicCount == 0 && pendingCrop == nil }
     var canSave: Bool { isDirty && !isBusy && !isDrawing && pendingMosaicCount == 0 && pendingCrop == nil }
     var canSaveCopy: Bool { frame != nil && !isBusy && !isDrawing && pendingMosaicCount == 0 && pendingCrop == nil }
-    var canRestore: Bool { frame != nil && !isBusy && (history.isDirty || pendingCrop != nil || isDrawing || pendingMosaicCount > 0) }
-    var hasToolOptions: Bool { isEditing && tool != .hand && tool != .crop && tool != .text }
-    var editorPanelHeight: CGFloat { hasToolOptions ? 92 : 48 }
+    var canRestore: Bool { frame != nil && !isBusy && (history.isDirty || hasTextChanges || pendingCrop != nil || isDrawing || pendingMosaicCount > 0) }
+    let editorPanelHeight: CGFloat = 48
+    var canSelectText: Bool { isEditing && (tool == .hand || tool == .text) && pendingMosaicCount == 0 }
+    var selectedText: TextAnnotation? { selectedTextID.flatMap { textOverlay.annotations[$0] } }
+    var parameterTool: EditTool { tool == .hand && selectedText != nil ? .text : tool }
+    var parameterInk: Ink {
+        if parameterTool == .text { return textDraft?.ink ?? textStylePreview?.annotation.ink ?? selectedText?.ink ?? ink }
+        return ink
+    }
+    var parameterTextSize: Double { textDraft?.fontSize ?? textStylePreview?.annotation.fontSize ?? selectedText?.fontSize ?? textSize }
+    var parameterTextBold: Bool { textDraft?.bold ?? textStylePreview?.annotation.bold ?? selectedText?.bold ?? textBold }
+
+    private var hasTextChanges: Bool {
+        textStylePreview != nil || (textDraft.map { $0.differs(from: textOverlay.annotations[$0.id]) } ?? false)
+    }
     var undoTitle: String { history.operationToUndo.map { "撤销" + $0.title } ?? "撤销" }
     var redoTitle: String { history.operationToRedo.map { "重做" + $0.title } ?? "重做" }
     var restoreHelp: String {
@@ -168,6 +187,7 @@ final class ViewerModel {
         currentURL = url; frame = nil; metadata = nil; source = nil; originalBounds = nil
         savedFeedbackTask?.cancel(); savedFeedback = false
         fingerprint = nil; history = EditHistory(); pendingCrop = nil
+        clearTextEditing()
         editRevision = 0; frameRevision = 0
         pendingMosaicCount = 0
         isEditing = false; tool = .hand; isLoading = true; loadingError = nil
@@ -199,6 +219,8 @@ final class ViewerModel {
     func toggleEditing() {
         guard canToggleEditing else { return }
         if isEditing {
+            guard finishTextDraft() else { return }
+            selectedTextID = nil
             isEditing = false; tool = .hand; cancelGestureID = UUID()
             revealControls(); return
         }
@@ -228,8 +250,17 @@ final class ViewerModel {
     }
 
     func chooseTool(_ next: EditTool) {
-        guard canChooseTool else { return }
+        guard canChooseTool, finishTextDraft() else { return }
+        if next != tool { selectedTextID = nil }
         tool = next; cancelGestureID = UUID(); revealControls()
+    }
+
+    func activateTool(_ next: EditTool) {
+        guard next == .text else { chooseTool(next); return }
+        if textDraft != nil { canvas?.focusTextInput(); return }
+        guard isEditing, canChooseTool, !isDrawing, pendingMosaicCount == 0 else { return }
+        if canvas?.visibleImageCenter == nil { setZoom(actualSize: false); canvas?.update() }
+        if let point = canvas?.visibleImageCenter { beginText(at: point) }
     }
 
     func newCanvasPanel() {
@@ -262,6 +293,7 @@ final class ViewerModel {
                 source = base.image; originalBounds = base.bounds; frame = preview
                 metadata = nil; currentURL = nil; files = []; fingerprint = nil; saveFormat = nil; multiFrame = false
                 history = EditHistory(); editRevision = 0; frameRevision = 0
+                clearTextEditing()
                 pendingCrop = nil; pendingMosaicCount = 0; isDrawing = false
                 isLoading = false; isCreatingCanvas = false; loadingError = nil; savedFeedback = false
                 requestedDimension = 2048; viewportCommand = nil
@@ -283,7 +315,8 @@ final class ViewerModel {
         let operations = history.operations, token = generation, revision = editRevision
         let id = UUID(); fillID = id; isFilling = true; revealControls()
         let task = Task.detached(priority: .userInitiated) {
-            let rendered = try ImageRenderer.render(source: source, originalBounds: originalBounds, operations: operations)
+            let rendered = try ImageRenderer.render(source: source, originalBounds: originalBounds,
+                operations: operations, includeText: false)
             return try ImageRenderer.fillMask(in: rendered, at: point, ink: ink)
         }
         fillTask = task
@@ -305,19 +338,157 @@ final class ViewerModel {
         fillID = UUID(); fillTask?.cancel(); fillTask = nil; isFilling = false
     }
 
-    func addText(at point: CGPoint) {
+    func beginText(at point: CGPoint, editing id: UUID? = nil) {
         guard isEditing, canChooseTool, !isDrawing, pendingMosaicCount == 0,
-              let bounds = frame?.bounds, bounds.contains(point) else { return }
-        isShowingPanel = true; revealControls()
-        let panel = TextDrawingPanel(at: point, within: bounds, color: NSColor(color).withAlphaComponent(opacity), fontSize: textSize, bold: textBold)
-        let patch = panel.run(for: window)
-        isShowingPanel = false
-        if let patch {
-            textSize = panel.fontSize; textBold = panel.bold
-            color = Color(nsColor: panel.selectedColor.withAlphaComponent(1)); opacity = panel.selectedColor.alphaComponent
-            commit(.text(patch: patch))
+              let bounds = frame?.bounds, bounds.contains(point), finishTextDraft() else { return }
+        let id = id ?? UUID()
+        let annotation = textOverlay.annotations[id]
+        tool = .text
+        textDraft = CanvasTextDraft(id: id, content: annotation?.content ?? "", origin: annotation?.patch.bounds.origin ?? point,
+            fontSize: annotation?.fontSize ?? textSize, bold: annotation?.bold ?? textBold, ink: annotation?.ink ?? ink)
+        selectedTextID = annotation == nil ? nil : id
+        canvas?.updateTextEditor()
+        canvas?.focusTextInput()
+        revealControls()
+    }
+
+    func updateTextContent(_ content: String) {
+        guard let textDraft, textDraft.content != content else { return }
+        self.textDraft?.content = content
+        textError = nil
+        window?.isDocumentEdited = isDirty
+    }
+
+    func setParameterColor(_ color: NSColor) {
+        guard let rgb = color.usingColorSpace(.sRGB) else { return }
+        if parameterTool == .text {
+            changeTextStyle(ink: Ink(red: rgb.redComponent, green: rgb.greenComponent,
+                blue: rgb.blueComponent, alpha: rgb.alphaComponent))
+        } else {
+            self.color = Color(nsColor: rgb.withAlphaComponent(1))
+            opacity = rgb.alphaComponent
         }
-        window?.makeFirstResponder(canvas); revealControls()
+    }
+
+    func changeTextStyle(fontSize: Double? = nil, bold: Bool? = nil, ink: Ink? = nil) {
+        if var draft = textDraft {
+            draft.fontSize = fontSize ?? draft.fontSize
+            draft.bold = bold ?? draft.bold
+            draft.ink = ink ?? draft.ink
+            textDraft = draft
+            textError = nil
+        } else if let id = selectedTextID, let original = selectedText, let bounds = originalBounds {
+            var annotation = textStylePreview?.annotation ?? original
+            annotation.fontSize = fontSize ?? annotation.fontSize
+            annotation.bold = bold ?? annotation.bold
+            annotation.ink = ink ?? annotation.ink
+            if annotation.fontSize == original.fontSize, annotation.bold == original.bold, annotation.ink == original.ink {
+                textStylePreview = nil
+            } else {
+                do {
+                    annotation.patch = try ImageRenderer.textPatch(annotation.content, at: original.patch.bounds.origin,
+                        within: bounds, fontSize: annotation.fontSize, bold: annotation.bold, ink: annotation.ink)
+                    textStylePreview = (id, annotation)
+                } catch {
+                    NSSound.beep()
+                    return
+                }
+            }
+        } else {
+            textSize = fontSize ?? textSize
+            textBold = bold ?? textBold
+            if let ink { setDefaultInk(ink) }
+        }
+        window?.isDocumentEdited = isDirty
+        canvas?.updateTextEditor()
+        canvas?.needsDisplay = true
+    }
+
+    func finishTextStyle() {
+        guard let preview = textStylePreview,
+              commit(.text(id: preview.id, annotation: preview.annotation)) != nil else { return }
+        textStylePreview = nil
+    }
+
+    @discardableResult
+    func finishTextDraft() -> Bool {
+        finishTextStyle()
+        guard let draft = textDraft else { return true }
+        guard canvas?.textEditor?.input.hasMarkedText() != true else { canvas?.focusTextInput(); return false }
+        let original = textOverlay.annotations[draft.id]
+        if draft.differs(from: original) {
+            if draft.isEmpty {
+                guard commit(.text(id: draft.id, annotation: nil)) != nil else { return false }
+                selectedTextID = nil
+            } else {
+                guard let bounds = original == nil ? frame?.bounds : originalBounds else { return false }
+                do {
+                    let patch = try draft.patch(within: bounds)
+                    let annotation = TextAnnotation(content: draft.content, fontSize: draft.fontSize,
+                        bold: draft.bold, ink: draft.ink, patch: patch)
+                    guard commit(.text(id: draft.id, annotation: annotation)) != nil else { return false }
+                    selectedTextID = draft.id
+                    textSize = draft.fontSize; textBold = draft.bold
+                    setDefaultInk(draft.ink)
+                } catch {
+                    textError = error.localizedDescription
+                    canvas?.updateTextEditor()
+                    canvas?.focusTextInput()
+                    return false
+                }
+            }
+        }
+        cancelTextDraft()
+        return true
+    }
+
+    func cancelTextDraft() {
+        textDraft = nil
+        textError = nil
+        canvas?.updateTextEditor()
+        canvas?.needsDisplay = true
+        window?.isDocumentEdited = isDirty
+    }
+
+    private func setDefaultInk(_ ink: Ink) {
+        color = Color(red: ink.red, green: ink.green, blue: ink.blue)
+        opacity = ink.alpha
+    }
+
+    private func clearTextEditing() {
+        selectedTextID = nil
+        textStylePreview = nil
+        cancelTextDraft()
+    }
+
+    func deleteSelectedText() {
+        guard canSelectText, let id = selectedTextID, selectedText != nil, !isDrawing else { return }
+        finishTextStyle()
+        if commit(.text(id: id, annotation: nil)) != nil { selectedTextID = nil }
+    }
+
+    func textPatch(_ patch: RenderedImage, movedTo origin: CGPoint) -> RenderedImage {
+        guard let bounds = frame?.bounds, let originalBounds else { return patch }
+        func clamp(_ position: CGFloat, size: CGFloat, min: CGFloat, max: CGFloat,
+                   originalMin: CGFloat, originalMax: CGFloat) -> CGFloat {
+            let fits = size <= max - min
+            let lower = Swift.max(originalMin, fits ? min : min - size + 1)
+            let upper = Swift.min(originalMax - size, fits ? max - size : max - 1)
+            return Swift.min(upper, Swift.max(lower, position.rounded()))
+        }
+        let size = patch.bounds.size
+        let point = CGPoint(
+            x: clamp(origin.x, size: size.width, min: bounds.minX, max: bounds.maxX,
+                originalMin: originalBounds.minX, originalMax: originalBounds.maxX),
+            y: clamp(origin.y, size: size.height, min: bounds.minY, max: bounds.maxY,
+                originalMin: originalBounds.minY, originalMax: originalBounds.maxY))
+        return RenderedImage(image: patch.image, bounds: CGRect(origin: point, size: size))
+    }
+
+    func moveText(_ id: UUID, to patch: RenderedImage) {
+        guard var annotation = textOverlay.annotations[id], annotation.patch.bounds != patch.bounds else { return }
+        annotation.patch = patch
+        commit(.text(id: id, annotation: annotation))
     }
 
     @discardableResult
@@ -352,17 +523,22 @@ final class ViewerModel {
 
     func undo() {
         guard canUndo else { return }
+        finishTextStyle()
         cancelGestureID = UUID(); pendingCrop = nil; history.undo()
         savedFeedback = false
         editRevision += 1
+        if selectedText == nil { selectedTextID = nil }
         window?.isDocumentEdited = isDirty; renderPreview(dimension: requestedDimension)
     }
 
     func redo() {
         guard canRedo else { return }
+        finishTextStyle()
+        guard canRedo else { return }
         cancelGestureID = UUID(); pendingCrop = nil; history.redo()
         savedFeedback = false
         editRevision += 1
+        if selectedText == nil { selectedTextID = nil }
         window?.isDocumentEdited = isDirty; renderPreview(dimension: requestedDimension)
     }
 
@@ -377,6 +553,7 @@ final class ViewerModel {
         guard alert.runModal() == .alertSecondButtonReturn else { return }
         canvas?.cancelPendingMosaics()
         history.restoreSaved(); editRevision += 1
+        clearTextEditing()
         savedFeedback = false
         pendingCrop = nil
         chooseTool(.hand)
@@ -416,7 +593,7 @@ final class ViewerModel {
             else if let url { image = try ImageCodec.decode(url, maxDimension: dimension) }
             else { throw PicGlideError.invalidImage }
             return try ImageRenderer.render(source: image, originalBounds: originalBounds,
-                                             operations: operations, maxDimension: dimension)
+                                             operations: operations, maxDimension: dimension, includeText: false)
         }
         renderTask = task
         Task { [weak self] in
@@ -437,7 +614,7 @@ final class ViewerModel {
         let operations = history.operations
         let task = Task.detached(priority: .userInitiated) {
             let frame = try ImageRenderer.render(source: source, originalBounds: originalBounds,
-                                                 operations: operations, maxDimension: 2048)
+                                                 operations: operations, maxDimension: 2048, includeText: false)
             try Task.checkCancellation()
             return try RenderedImage(image: ImageRenderer.mosaicImage(frame, blockSize: blockSize), bounds: frame.bounds)
         }
@@ -456,6 +633,7 @@ final class ViewerModel {
             alert.addButton(withTitle: "好")
             alert.runModal(); completion?(false); return
         }
+        guard finishTextDraft() else { completion?(false); return }
         if !asCopy && multiFrame {
             showError(PicGlideError.multiFrame)
             save(asCopy: true, completion: completion); return
@@ -595,7 +773,7 @@ final class ViewerModel {
 private extension EditOperation {
     var title: String {
         switch self { case .crop: "裁剪"; case .mosaic: "马赛克"; case .rectangle: "画框"; case .pencil: "铅笔"
-        case .fill: "涂色"; case .text: "文字" }
+        case .fill: "涂色"; case .text(_, let annotation): annotation == nil ? "删除文字" : "文字" }
     }
 }
 

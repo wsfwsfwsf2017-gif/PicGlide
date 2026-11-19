@@ -349,7 +349,7 @@ func runLayoutChecks(delegate: AppDelegate, output: URL) async {
                         "tool": tool.rawValue, "imageFitsCanvas": fits, "imageOverlapsToolbar": overlaps,
                         "fileActionsVisible": true])
                     if ProcessInfo.processInfo.environment["PICGLIDE_LAYOUT_ASSERT"] == "1" {
-                        precondition(fits && !overlaps, "Fit image is clipped or overlaps toolbar")
+                        precondition(fits && !overlaps && abs(toolbar.height - 48) < 1, "Fit image is clipped or toolbar is not a single row")
                     }
                     if sizeIndex == 0 || tool == .mosaic { try capture(prefix + "-" + tool.rawValue) }
                 }

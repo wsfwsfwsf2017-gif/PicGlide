@@ -27,6 +27,8 @@ final class CanvasView: NSView {
     private var cropAdjustment: CropAdjustment?
     private var cropStart: CGRect?
     private(set) var cropControls: NSHostingView<CropControls>?
+    private(set) var textEditor: CanvasTextEditor?
+    private var textDrag: (id: UUID, start: CGPoint, original: RenderedImage, current: RenderedImage)?
     var mosaicPreview: CGImage? { mosaicFrame?.image }
     private var mosaicFrame: RenderedImage?
     private var completedMosaics: [(revision: Int, operations: [EditOperation])] = []
@@ -40,7 +42,13 @@ final class CanvasView: NSView {
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
-    var hasActiveGesture: Bool { dragStart != nil }
+    var hasActiveGesture: Bool { dragStart != nil || textDrag != nil }
+
+    var visibleImageCenter: CGPoint? {
+        let area = viewport.imageRect.intersection(visibleRect)
+        guard !area.isEmpty else { return nil }
+        return viewport.imagePoint(from: CGPoint(x: area.midX, y: area.midY))
+    }
 
     init(model: ViewerModel) {
         self.model = model
@@ -91,6 +99,7 @@ final class CanvasView: NSView {
         }
         window?.invalidateCursorRects(for: self)
         updateCropControls()
+        updateTextEditor()
         needsDisplay = true
     }
 
@@ -106,7 +115,7 @@ final class CanvasView: NSView {
             fitMode = false
         } else if fitMode { viewport.fit(inset: 12) }
         workspaceHeight = reserved
-        notifyZoom(); updateCropControls(); needsDisplay = true
+        notifyZoom(); updateCropControls(); updateTextEditor(); needsDisplay = true
     }
 
     private func notifyZoom() {
@@ -127,9 +136,11 @@ final class CanvasView: NSView {
 
     var canvasCursor: NSCursor {
         if model.frame == nil || model.isBusy { return .arrow }
-        if isPanning { return .closedHand }
+        if isPanning || textDrag != nil { return .closedHand }
+        if let pointer, textEditor?.frame.contains(pointer) == true { return .iBeam }
+        if !spaceHeld, let pointer, textHit(pointer) != nil { return .openHand }
         if !model.isEditing || model.tool == .hand || spaceHeld { return .openHand }
-        if model.tool == .text { return .iBeam }
+        if model.tool == .text { return .arrow }
         if model.tool == .crop, let adjustment = cropAdjustment ?? pointer.flatMap(cropHit) {
             switch adjustment {
             case .move: return dragStart == nil ? .openHand : .closedHand
@@ -140,6 +151,36 @@ final class CanvasView: NSView {
             }
         }
         return .crosshair
+    }
+
+    private func textHit(_ point: CGPoint) -> UUID? {
+        guard model.canSelectText else { return nil }
+        return model.textOverlay.hit(at: viewport.imagePoint(from: point), within: viewport.imageBounds,
+            padding: 4 / viewport.scale)
+    }
+
+    func updateTextEditor() {
+        guard let draft = model.textDraft, model.isEditing else {
+            if let editor = textEditor {
+                if window?.firstResponder === editor.input { window?.makeFirstResponder(self) }
+                editor.removeFromSuperview()
+                textEditor = nil
+            }
+            needsDisplay = true
+            return
+        }
+        if textEditor?.id != draft.id {
+            textEditor?.removeFromSuperview()
+            let editor = CanvasTextEditor(draft: draft, canvas: self)
+            textEditor = editor
+            addSubview(editor)
+        }
+        textEditor?.position(draft: draft, error: model.textError, in: self)
+        needsDisplay = true
+    }
+
+    func focusTextInput() {
+        if let input = textEditor?.input { window?.makeFirstResponder(input) }
     }
 
     private static let diagonalDown = diagonalCursor("arrow.up.left.and.arrow.down.right")
@@ -235,31 +276,31 @@ final class CanvasView: NSView {
             for point in stroke.dropFirst() { context.addLine(to: viewport.viewPoint(from: point)) }
             context.strokePath(); context.restoreGState()
         }
-        if let selection = selection ?? model.pendingCrop {
+        if model.tool == .rectangle, let selection {
+            let start = viewport.viewPoint(from: selection.origin)
+            let drawn = CGRect(origin: start, size: CGSize(width: selection.width * viewport.scale, height: selection.height * viewport.scale))
+            context.saveGState()
+            context.clip(to: rect); context.setStrokeColor(model.ink.cgColor)
+            context.setLineWidth(model.lineWidth * viewport.scale); context.stroke(drawn)
+            context.restoreGState()
+        }
+        drawText(in: context)
+        if model.tool == .crop, let selection = selection ?? model.pendingCrop {
             let start = viewport.viewPoint(from: selection.origin)
             let drawn = CGRect(x: start.x, y: start.y,
                                width: selection.width * viewport.scale, height: selection.height * viewport.scale)
             context.saveGState()
-            if model.tool == .rectangle {
-                context.clip(to: rect); context.setStrokeColor(model.ink.cgColor)
-                context.setLineWidth(model.lineWidth * viewport.scale); context.stroke(drawn)
-            } else {
-                if model.tool == .crop {
-                    let mask = CGMutablePath(); mask.addRect(rect); mask.addRect(drawn)
-                    context.setFillColor(NSColor.black.withAlphaComponent(0.52).cgColor)
-                    context.addPath(mask); context.drawPath(using: .eoFill)
-                }
-                context.setStrokeColor(NSColor.white.cgColor); context.setLineWidth(1.5)
-                context.stroke(drawn)
-                if model.tool == .crop {
-                    for handle in CropAdjustment.allCases where handle != .move {
-                        let point = viewport.viewPoint(from: handle.point(in: selection))
-                        let box = CGRect(x: point.x - 3.5, y: point.y - 3.5, width: 7, height: 7)
-                        context.setFillColor(NSColor.white.cgColor); context.fill(box)
-                        context.setStrokeColor(NSColor.black.withAlphaComponent(0.6).cgColor)
-                        context.setLineWidth(1); context.stroke(box)
-                    }
-                }
+            let mask = CGMutablePath(); mask.addRect(rect); mask.addRect(drawn)
+            context.setFillColor(NSColor.black.withAlphaComponent(0.52).cgColor)
+            context.addPath(mask); context.drawPath(using: .eoFill)
+            context.setStrokeColor(NSColor.white.cgColor); context.setLineWidth(1.5)
+            context.stroke(drawn)
+            for handle in CropAdjustment.allCases where handle != .move {
+                let point = viewport.viewPoint(from: handle.point(in: selection))
+                let box = CGRect(x: point.x - 3.5, y: point.y - 3.5, width: 7, height: 7)
+                context.setFillColor(NSColor.white.cgColor); context.fill(box)
+                context.setStrokeColor(NSColor.black.withAlphaComponent(0.6).cgColor)
+                context.setLineWidth(1); context.stroke(box)
             }
             context.restoreGState()
         }
@@ -274,6 +315,34 @@ final class CanvasView: NSView {
             context.setStrokeColor(NSColor.white.cgColor); context.setLineWidth(1)
             context.strokeEllipse(in: ring); context.restoreGState()
         }
+    }
+
+    private func drawText(in context: CGContext) {
+        guard !model.textOverlay.annotations.isEmpty else { return }
+        let origin = viewport.viewPoint(from: .zero)
+        let transform = CGAffineTransform(a: viewport.scale, b: 0, c: 0, d: viewport.scale, tx: origin.x, ty: origin.y)
+        let replacement = textDrag.map { (id: $0.id, patch: $0.current) }
+            ?? model.textStylePreview.map { (id: $0.id, patch: $0.annotation.patch) }
+        let liveMask = model.tool == .mosaic && mosaicFrame != nil && !stroke.isEmpty
+            ? ImageRenderer.mosaicPath(stroke, diameter: strokeDiameter) : nil
+        context.saveGState()
+        context.clip(to: bounds)
+        context.interpolationQuality = .high
+        model.textOverlay.draw(in: context, bounds: viewport.imageBounds, transform: transform,
+            hiding: model.textDraft?.id, replacing: replacement, liveMask: liveMask)
+        if model.canSelectText, model.textDraft == nil, let annotation = model.selectedText {
+            let patch = replacement?.patch ?? annotation.patch
+            let visible = patch.bounds.intersection(viewport.imageBounds)
+            if !visible.isEmpty {
+                let selection = visible.applying(transform).insetBy(dx: -3, dy: -2)
+                context.setLineWidth(1)
+                context.setStrokeColor(NSColor.white.withAlphaComponent(0.85).cgColor)
+                context.stroke(selection.insetBy(dx: -1, dy: -1))
+                context.setStrokeColor(NSColor.controlAccentColor.cgColor)
+                context.stroke(selection)
+            }
+        }
+        context.restoreGState()
     }
 
     private func drawMosaic(_ operation: EditOperation, in context: CGContext) {
@@ -384,16 +453,36 @@ final class CanvasView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         guard model.frame != nil, !model.isBusy else { return }
+        if model.textDraft != nil {
+            model.finishTextDraft()
+            return
+        }
         window?.makeFirstResponder(self); model.revealControls()
         model.navigationHover = 0
         let point = convert(event.locationInWindow, from: nil)
         pointer = point
+        if !spaceHeld, model.canSelectText {
+            model.finishTextStyle()
+            if let id = textHit(point), let annotation = model.textOverlay.annotations[id] {
+                let imagePoint = viewport.imagePoint(from: point)
+                model.selectedTextID = id
+                if event.clickCount == 2 {
+                    model.beginText(at: imagePoint, editing: id)
+                } else {
+                    textDrag = (id, imagePoint, annotation.patch, annotation.patch)
+                    model.isDrawing = true
+                    NSCursor.closedHand.set()
+                }
+                needsDisplay = true
+                return
+            }
+            model.selectedTextID = nil
+            if model.tool == .text { needsDisplay = true; return }
+        }
         isPanning = !model.isEditing || model.tool == .hand || spaceHeld
-        if !isPanning, model.tool == .fill || model.tool == .text {
+        if !isPanning, model.tool == .fill {
             guard viewport.imageRect.contains(point) else { return }
-            let imagePoint = viewport.imagePoint(from: point)
-            if model.tool == .fill { model.fill(at: imagePoint) }
-            else { model.addText(at: imagePoint) }
+            model.fill(at: viewport.imagePoint(from: point))
             return
         }
         guard isPanning || model.tool == .mosaic || model.pendingMosaicCount == 0 else { return }
@@ -422,6 +511,14 @@ final class CanvasView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if let drag = textDrag {
+            let point = viewport.imagePoint(from: convert(event.locationInWindow, from: nil))
+            let origin = drag.original.bounds.origin
+            textDrag?.current = model.textPatch(drag.original,
+                movedTo: CGPoint(x: origin.x + point.x - drag.start.x, y: origin.y + point.y - drag.start.y))
+            needsDisplay = true
+            return
+        }
         guard let start = dragStart else { return }
         let point = convert(event.locationInWindow, from: nil)
         pointer = point
@@ -447,6 +544,14 @@ final class CanvasView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if let drag = textDrag {
+            clearGesture()
+            model.moveText(drag.id, to: drag.current)
+            canvasCursor.set()
+            window?.invalidateCursorRects(for: self)
+            needsDisplay = true
+            return
+        }
         guard dragStart != nil else { return }
         if !isPanning {
             switch model.tool {
@@ -488,19 +593,37 @@ final class CanvasView: NSView {
         guard model.frame != nil, !model.isBusy else { return }
         let delta = event.scrollingDeltaY / (event.hasPreciseScrollingDeltas ? 12 : 1)
         viewport.zoom(by: pow(1.12, max(-12, min(12, delta))), around: convert(event.locationInWindow, from: nil))
-        fitMode = false; notifyZoom(); updateCropControls(); model.revealControls(); needsDisplay = true
+        fitMode = false; notifyZoom(); updateCropControls(); updateTextEditor(); model.revealControls(); needsDisplay = true
     }
 
     override func magnify(with event: NSEvent) {
         guard model.frame != nil, !model.isBusy else { return }
         viewport.zoom(by: max(0.1, 1 + event.magnification), around: convert(event.locationInWindow, from: nil))
-        fitMode = false; notifyZoom(); updateCropControls(); model.revealControls(); needsDisplay = true
+        fitMode = false; notifyZoom(); updateCropControls(); updateTextEditor(); model.revealControls(); needsDisplay = true
     }
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53, model.isFilling { model.cancelFill(); return }
         guard !model.isBusy else { return }
         model.revealControls()
+        if model.canSelectText, !hasActiveGesture, model.textDraft == nil,
+           let id = model.selectedTextID, let annotation = model.selectedText {
+            let origin = annotation.patch.bounds.origin
+            var delta = CGPoint.zero
+            switch event.keyCode {
+            case 123: delta.x = -1
+            case 124: delta.x = 1
+            case 125: delta.y = 1
+            case 126: delta.y = -1
+            case 51, 117: model.deleteSelectedText(); return
+            case 53: model.selectedTextID = nil; needsDisplay = true; return
+            default: break
+            }
+            if delta != .zero {
+                model.moveText(id, to: model.textPatch(annotation.patch, movedTo: CGPoint(x: origin.x + delta.x, y: origin.y + delta.y)))
+                return
+            }
+        }
         switch event.keyCode {
         case 123, 126: model.navigate(-1)
         case 124, 125: model.navigate(1)
@@ -508,8 +631,9 @@ final class CanvasView: NSView {
             spaceHeld = true; window?.invalidateCursorRects(for: self)
         case 36, 76: model.applyCrop()
         case 53:
-            if model.isEditing && model.tool == .crop { clearGesture(); model.cancelCrop() }
-            else if dragStart != nil { clearGesture() }
+            if model.textDraft != nil { model.cancelTextDraft() }
+            else if model.isEditing && model.tool == .crop { clearGesture(); model.cancelCrop() }
+            else if hasActiveGesture { clearGesture() }
             else if !pendingMosaics.isEmpty {
                 pendingMosaics.removeLast(); model.pendingMosaicCount = pendingMosaics.count
                 if pendingMosaics.isEmpty { cancelPendingMosaics() }
@@ -533,6 +657,7 @@ final class CanvasView: NSView {
 
     private func clearGesture() {
         dragStart = nil; selection = nil; stroke.removeAll(); isPanning = false
+        textDrag = nil
         cropAdjustment = nil; cropStart = nil; model.isDrawing = false
         if pendingMosaics.isEmpty { cancelPendingMosaics() }
         mosaicID = UUID(); mosaicFrame = nil

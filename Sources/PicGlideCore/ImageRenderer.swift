@@ -87,7 +87,8 @@ public enum ImageRenderer {
     }
 
     public static func render(source: CGImage, originalBounds: CGRect,
-                              operations: [EditOperation], maxDimension: Int? = nil) throws -> RenderedImage {
+                              operations: [EditOperation], maxDimension: Int? = nil,
+                              includeText: Bool = true) throws -> RenderedImage {
         var image = source
         var bounds = originalBounds
         if let maxDimension, max(source.width, source.height) > maxDimension {
@@ -101,6 +102,7 @@ public enum ImageRenderer {
         }
         for operation in operations {
             try Task.checkCancellation()
+            if case .text = operation { continue }
             let sx = CGFloat(image.width) / bounds.width
             let sy = CGFloat(image.height) / bounds.height
             func localRect(_ rect: CGRect) -> CGRect {
@@ -123,10 +125,6 @@ public enum ImageRenderer {
                 let target = CGRect(x: rect.minX, y: CGFloat(image.height) - rect.maxY, width: rect.width, height: rect.height)
                 context.clip(to: target, mask: mask.image)
                 context.setFillColor(ink.cgColor); context.fill(target)
-            case let .text(patch):
-                let rect = localRect(patch.bounds)
-                context.draw(patch.image, in: CGRect(x: rect.minX, y: CGFloat(image.height) - rect.maxY,
-                    width: rect.width, height: rect.height))
             case let .mosaic(points, diameter, blockSize, patch):
                 guard diameter.isFinite, diameter > 0,
                       blockSize.isFinite, blockSize > 0, !patch.bounds.isEmpty,
@@ -160,10 +158,25 @@ public enum ImageRenderer {
                     }
                     context.strokePath()
                 }
-            case .crop: break
+            case .crop, .text: break
             }
             guard let rendered = context.makeImage() else { throw PicGlideError.invalidImage }
             image = rendered
+        }
+        if includeText {
+            let text = TextOverlay(operations)
+            if !text.annotations.isEmpty {
+                try Task.checkCancellation()
+                let context = try context(width: image.width, height: image.height)
+                context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+                let sx = CGFloat(image.width) / bounds.width
+                let sy = CGFloat(image.height) / bounds.height
+                text.draw(in: context, bounds: bounds,
+                    transform: CGAffineTransform(a: sx, b: 0, c: 0, d: -sy,
+                        tx: -bounds.minX * sx, ty: CGFloat(image.height) + bounds.minY * sy))
+                guard let composited = context.makeImage() else { throw PicGlideError.invalidImage }
+                image = composited
+            }
         }
         return RenderedImage(image: image, bounds: bounds)
     }

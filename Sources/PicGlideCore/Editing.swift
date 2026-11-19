@@ -17,6 +17,22 @@ public struct Ink: Equatable, Sendable {
     }
 }
 
+public struct TextAnnotation: Equatable, Sendable {
+    public var content: String
+    public var fontSize: Double
+    public var bold: Bool
+    public var ink: Ink
+    public var patch: RenderedImage
+
+    public init(content: String, fontSize: Double, bold: Bool, ink: Ink, patch: RenderedImage) {
+        self.content = content
+        self.fontSize = fontSize
+        self.bold = bold
+        self.ink = ink
+        self.patch = patch
+    }
+}
+
 // Coordinates stay in the oriented original image, even after a crop.
 public enum EditOperation: Equatable, Sendable {
     case crop(CGRect)
@@ -24,7 +40,7 @@ public enum EditOperation: Equatable, Sendable {
     case rectangle(CGRect, ink: Ink, width: Double)
     case pencil([CGPoint], ink: Ink, width: Double)
     case fill(mask: RenderedImage, ink: Ink)
-    case text(patch: RenderedImage)
+    case text(id: UUID, annotation: TextAnnotation?)
 }
 
 public struct EditHistory: Sendable {

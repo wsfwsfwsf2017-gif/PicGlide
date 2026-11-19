@@ -2,21 +2,20 @@ import AppKit
 import SwiftUI
 
 struct SimpleColorPicker: NSViewRepresentable {
-    @Binding var color: Color
-    @Binding var opacity: Double
+    let color: NSColor
     let label: String
+    let onChange: (NSColor) -> Void
+    let onClose: () -> Void
     @Environment(\.isEnabled) private var isEnabled
 
     func makeNSView(context: Context) -> PaletteColorButton { PaletteColorButton() }
     func updateNSView(_ button: PaletteColorButton, context: Context) {
-        button.color = NSColor(color).withAlphaComponent(opacity)
+        button.color = color
         button.isEnabled = isEnabled
         button.setAccessibilityLabel(label)
         button.identifier = NSUserInterfaceItemIdentifier("parameter.color")
-        button.onChange = { selected in
-            color = Color(nsColor: selected.withAlphaComponent(1))
-            opacity = selected.alphaComponent
-        }
+        button.onChange = onChange
+        button.onClose = onClose
         if !isEnabled { button.closePalette() }
     }
 }
@@ -32,6 +31,7 @@ final class PaletteColorButton: NSButton, NSPopoverDelegate {
         didSet { image = Self.swatch(color); palette?.refresh(color) }
     }
     var onChange: ((NSColor) -> Void)?
+    var onClose: (() -> Void)?
     private(set) var popover: NSPopover?
     private(set) var palette: ColorPaletteController?
     private weak var previousResponder: NSResponder?
@@ -72,6 +72,7 @@ final class PaletteColorButton: NSButton, NSPopoverDelegate {
             window?.makeFirstResponder(previous)
         }
         palette = nil; popover = nil; previousResponder = nil
+        onClose?()
     }
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         if newWindow !== window { closePalette() }
