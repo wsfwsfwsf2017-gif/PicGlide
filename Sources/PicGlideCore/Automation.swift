@@ -133,7 +133,7 @@ public struct AutomationOperation: Sendable {
         ink = Ink(red: Double((rgb >> 16) & 255) / 255, green: Double((rgb >> 8) & 255) / 255,
                   blue: Double(rgb & 255) / 255, alpha: opacity)
         width = try number("lineWidth", default: 6, in: 1...64)
-        diameter = try number("diameter", default: 20, in: 8...512)
+        diameter = try number("diameter", default: EditOperation.defaultMosaicDiameter, in: 8...512)
         blockSize = try number("blockSize", default: 24, in: 4...64)
     }
 

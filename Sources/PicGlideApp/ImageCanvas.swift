@@ -36,7 +36,7 @@ final class CanvasView: NSView {
     private var mosaicTask: Task<Void, Never>?
     private var mosaicID = UUID()
     private var mosaicTaskID = UUID()
-    private var strokeDiameter: Double = 20
+    private var strokeDiameter = EditOperation.defaultMosaicDiameter
     private var strokeBlockSize: Double = 24
     private var tracking: NSTrackingArea?
 

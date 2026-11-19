@@ -35,6 +35,8 @@ public struct TextAnnotation: Equatable, Sendable {
 
 // Coordinates stay in the oriented original image, even after a crop.
 public enum EditOperation: Equatable, Sendable {
+    public static let defaultMosaicDiameter: Double = 50
+
     case crop(CGRect)
     case mosaic([CGPoint], diameter: Double, blockSize: Double, patch: RenderedImage)
     case rectangle(CGRect, ink: Ink, width: Double)

@@ -567,8 +567,8 @@ func runSmokeChecks(delegate: AppDelegate) async {
         try? FileManager.default.removeItem(at: output.appendingPathComponent("ui-report.json"))
         try? FileManager.default.removeItem(at: output.appendingPathComponent("failure.txt"))
         try await Task.sleep(for: .milliseconds(500))
-        guard delegate.model.mosaicDiameter == 20 && delegate.model.blockSize == 24 else { fatalError("Incorrect default mosaic settings") }
-        checks.append("Default circular mosaic is 20px with 24px particles")
+        guard delegate.model.mosaicDiameter == 50 && delegate.model.blockSize == 24 else { fatalError("Incorrect default mosaic settings") }
+        checks.append("Default circular mosaic is 50px with 24px particles")
         guard fillsCurrentScreen(), !delegate.window.styleMask.contains(.fullScreen) else {
             fatalError("Launch did not fill current screen's available area as a normal window")
         }

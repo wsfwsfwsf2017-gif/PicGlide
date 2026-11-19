@@ -19,7 +19,7 @@ enum AgentCommandLine {
                         "pencil": ["required": ["points"], "optional": ["color", "lineWidth", "opacity"]],
                         "mosaic": ["required": ["points"], "optional": ["diameter", "blockSize"]]],
                     "points": "nonempty [{x:number,y:number}], within current image",
-                    "defaults": ["diameter": 20, "blockSize": 24, "lineWidth": 6, "color": "#3DA3FF", "opacity": 1],
+                    "defaults": ["diameter": EditOperation.defaultMosaicDiameter, "blockSize": 24, "lineWidth": 6, "color": "#3DA3FF", "opacity": 1],
                     "ranges": ["diameter": [8, 512], "blockSize": [4, 64], "lineWidth": [1, 64], "opacity": [0.05, 1]],
                     "inputFormats": ImageFormat.extensions.sorted(),
                     "outputFormats": ["png", "jpg", "jpeg", "webp"], "overwrite": false,

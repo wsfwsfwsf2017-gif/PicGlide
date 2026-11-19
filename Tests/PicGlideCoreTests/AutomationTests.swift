@@ -55,16 +55,21 @@ private func automationPixels(_ image: CGImage) throws -> Data {
 @Test func agentMosaicAfterCropKeepsTransparencyThroughWebP() throws {
     let (directory, _) = try automationFixture()
     defer { try? FileManager.default.removeItem(at: directory) }
-    let request = try automationRequest(directory, operations: [
-        ["type": "crop", "x": 20, "y": 10, "width": 80, "height": 70],
-        ["type": "mosaic", "points": [["x": 20, "y": 30], ["x": 60, "y": 30]]]
-    ], output: "result.webp")
+    let crop: [String: Any] = ["type": "crop", "x": 20, "y": 10, "width": 80, "height": 70]
+    var mosaic: [String: Any] = ["type": "mosaic", "points": [["x": 20, "y": 30], ["x": 60, "y": 30]]]
+    let request = try automationRequest(directory, operations: [crop, mosaic], output: "result.webp")
     let rendered = try request.execute()
     let decoded = try ImageCodec.decode(request.output, maxDimension: 120)
     #expect(decoded.width == 80 && decoded.height == 70)
     #expect(try automationPixels(decoded) == automationPixels(rendered.image))
     let bytes = try automationPixels(decoded)
     #expect(bytes[(30 * 80 + 40) * 4 + 3] == 153)
+    mosaic["diameter"] = 50
+    let explicit = try automationRequest(directory, operations: [crop, mosaic], output: "explicit.webp").execute()
+    #expect(try automationPixels(rendered.image) == automationPixels(explicit.image))
+    mosaic["diameter"] = 20
+    let smaller = try automationRequest(directory, operations: [crop, mosaic], output: "smaller.webp").execute()
+    #expect(try automationPixels(rendered.image) != automationPixels(smaller.image))
 }
 
 @Test func agentRejectsInvalidRequestsWithoutWriting() throws {

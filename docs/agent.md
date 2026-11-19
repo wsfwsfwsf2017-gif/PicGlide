@@ -28,7 +28,7 @@ picglide_bin='/Applications/PicGlide.app/Contents/MacOS/PicGlide'
     { "type": "crop", "x": 100, "y": 80, "width": 800, "height": 600 },
     { "type": "rectangle", "x": 40, "y": 40, "width": 300, "height": 150, "color": "#3DA3FF", "lineWidth": 6 },
     { "type": "pencil", "points": [{ "x": 100, "y": 300 }, { "x": 700, "y": 350 }], "opacity": 0.8 },
-    { "type": "mosaic", "points": [{ "x": 100, "y": 480 }, { "x": 600, "y": 480 }], "diameter": 20, "blockSize": 24 }
+    { "type": "mosaic", "points": [{ "x": 100, "y": 480 }, { "x": 600, "y": 480 }], "diameter": 50, "blockSize": 24 }
   ]
 }
 ```
@@ -51,7 +51,7 @@ picglide_bin='/Applications/PicGlide.app/Contents/MacOS/PicGlide'
 | `crop` | `x`、`y`、`width`、`height` | 无；坐标和尺寸为整数，尺寸至少 1×1px |
 | `rectangle` | `x`、`y`、`width`、`height` | `color: "#3DA3FF"`、`lineWidth: 6`、`opacity: 1` |
 | `pencil` | `points: [{"x":0,"y":0}]` | 与画框相同的颜色、线宽和透明度 |
-| `mosaic` | `points: [{"x":0,"y":0}]` | `diameter: 20`、`blockSize: 24` |
+| `mosaic` | `points: [{"x":0,"y":0}]` | `diameter: 50`、`blockSize: 24` |
 
 圆形马赛克和铅笔均支持单点及连续路径。区域与路径点须在当前步骤图片内，笔刷超出图片边缘的部分被裁切。数值须有限，禁止布尔值代替数值；未知字段和操作会报错。
 

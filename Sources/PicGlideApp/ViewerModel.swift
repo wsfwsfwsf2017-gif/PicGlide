@@ -47,7 +47,7 @@ final class ViewerModel {
     var lineWidth: Double = 6
     var opacity: Double = 1
     var blockSize: Double = 24
-    var mosaicDiameter: Double = 20
+    var mosaicDiameter = EditOperation.defaultMosaicDiameter
     private var textSize: Double = 32
     private var textBold = false
     var isDrawing = false

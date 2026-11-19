@@ -56,7 +56,7 @@ def job(name, operations, target=None, source=None):
 
 capabilities = invoke("capabilities")["result"]
 assert capabilities["overwrite"] is False
-assert capabilities["defaults"]["diameter"] == 20
+assert capabilities["defaults"]["diameter"] == 50
 checks.append("Machine-readable capabilities and parameter defaults")
 info = invoke("inspect", str(input_path))["result"]
 assert (info["pixelWidth"], info["pixelHeight"]) == (1000, 800)
